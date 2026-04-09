@@ -18,6 +18,7 @@ pub struct Claims {
 pub struct AuthReq {
     pub username: String,
     pub password: String,
+    pub email: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -76,10 +77,10 @@ pub async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<Clai
     Ok(claims)
 }
 
-pub async fn create_user_internal(pool: &sqlx::SqlitePool, username: &str, password: &str, is_admin: bool) -> Result<db::User, StatusCode> {
+pub async fn create_user_internal(pool: &sqlx::SqlitePool, username: &str, email: &str, password: &str, is_admin: bool) -> Result<db::User, StatusCode> {
     let pw_hash = hash_password(password)?;
     let api_key = format!("sk-relay-{}", uuid::Uuid::new_v4());
-    db::insert_user(pool, username, &pw_hash, &api_key, is_admin)
+    db::insert_user(pool, username, email, &pw_hash, &api_key, is_admin)
         .await
         .map_err(|_| StatusCode::CONFLICT)
 }
@@ -90,9 +91,13 @@ pub async fn register(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AuthReq>,
 ) -> Result<Json<AuthResp>, StatusCode> {
+    let email = req.email.as_deref().unwrap_or("");
+    if email.is_empty() || !email.contains('@') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     // First user is auto-admin
     let is_admin = db::user_count(&state.db).await.unwrap_or(0) == 0;
-    let user = create_user_internal(&state.db, &req.username, &req.password, is_admin).await?;
+    let user = create_user_internal(&state.db, &req.username, email, &req.password, is_admin).await?;
     let token = make_jwt(&state, &user.username, user.is_admin)?;
     Ok(Json(AuthResp { token, api_key: user.api_key }))
 }

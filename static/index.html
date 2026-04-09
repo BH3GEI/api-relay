@@ -37,6 +37,7 @@ pre { background: #111; padding: 12px; border-radius: 6px; overflow-x: auto; fon
   <div class="card">
     <h2>Login / Register</h2>
     <input id="username" placeholder="Username">
+    <input id="email" type="email" placeholder="Email">
     <input id="password" type="password" placeholder="Password">
     <div style="display:flex;gap:8px">
       <button onclick="login()">Login</button>
@@ -114,7 +115,7 @@ async function register() {
   try {
     const res = await api('/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ username: document.getElementById('username').value, password: document.getElementById('password').value })
+      body: JSON.stringify({ username: document.getElementById('username').value, email: document.getElementById('email').value, password: document.getElementById('password').value })
     });
     token = res.token;
     apiKey = res.api_key;

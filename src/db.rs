@@ -5,6 +5,7 @@ use sqlx::SqlitePool;
 pub struct User {
     pub id: i64,
     pub username: String,
+    pub email: String,
     #[serde(skip)]
     pub password_hash: String,
     pub api_key: String,
@@ -55,12 +56,16 @@ pub async fn migrate(pool: &SqlitePool) {
         "CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
+            email TEXT NOT NULL DEFAULT '',
             password_hash TEXT NOT NULL,
             api_key TEXT UNIQUE NOT NULL,
             is_admin BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )"
     ).execute(pool).await.unwrap();
+    // Migration: add email column if missing
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+        .execute(pool).await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS providers (
@@ -109,10 +114,10 @@ pub async fn find_user_by_api_key(pool: &SqlitePool, api_key: &str) -> Result<Us
     sqlx::query_as("SELECT * FROM users WHERE api_key = ?").bind(api_key).fetch_one(pool).await
 }
 
-pub async fn insert_user(pool: &SqlitePool, username: &str, password_hash: &str, api_key: &str, is_admin: bool) -> Result<User, sqlx::Error> {
+pub async fn insert_user(pool: &SqlitePool, username: &str, email: &str, password_hash: &str, api_key: &str, is_admin: bool) -> Result<User, sqlx::Error> {
     sqlx::query_as(
-        "INSERT INTO users (username, password_hash, api_key, is_admin) VALUES (?, ?, ?, ?) RETURNING *"
-    ).bind(username).bind(password_hash).bind(api_key).bind(is_admin).fetch_one(pool).await
+        "INSERT INTO users (username, email, password_hash, api_key, is_admin) VALUES (?, ?, ?, ?, ?) RETURNING *"
+    ).bind(username).bind(email).bind(password_hash).bind(api_key).bind(is_admin).fetch_one(pool).await
 }
 
 pub async fn update_user_api_key(pool: &SqlitePool, user_id: i64, new_key: &str) -> Result<(), sqlx::Error> {

@@ -73,11 +73,11 @@ async fn admin_list_users(State(state): State<Arc<AppState>>, headers: HeaderMap
 }
 
 #[derive(Deserialize)]
-struct CreateUserReq { username: String, password: String, is_admin: Option<bool> }
+struct CreateUserReq { username: String, email: Option<String>, password: String, is_admin: Option<bool> }
 
 async fn admin_create_user(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(req): Json<CreateUserReq>) -> Result<Json<db::User>, StatusCode> {
     auth::require_admin(&state, &headers).await?;
-    auth::create_user_internal(&state.db, &req.username, &req.password, req.is_admin.unwrap_or(false))
+    auth::create_user_internal(&state.db, &req.username, req.email.as_deref().unwrap_or(""), &req.password, req.is_admin.unwrap_or(false))
         .await.map(Json).map_err(|_| StatusCode::CONFLICT)
 }
 

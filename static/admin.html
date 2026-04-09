@@ -60,11 +60,12 @@ th { color: #888; font-weight: 600; }
     <h2>Users</h2>
     <div style="margin-bottom:12px">
       <input id="new-user" placeholder="Username">
+      <input id="new-email" type="email" placeholder="Email">
       <input id="new-pass" type="password" placeholder="Password">
       <label style="color:#888;font-size:13px"><input type="checkbox" id="new-admin"> Admin</label>
       <button onclick="createUser()">Add User</button>
     </div>
-    <table><thead><tr><th>ID</th><th>Username</th><th>API Key</th><th>Admin</th><th></th></tr></thead><tbody id="users-body"></tbody></table>
+    <table><thead><tr><th>ID</th><th>Username</th><th>Email</th><th>API Key</th><th>Admin</th><th></th></tr></thead><tbody id="users-body"></tbody></table>
   </div>
 
   <!-- Providers -->
@@ -169,7 +170,7 @@ async function loadUsers() {
   const users = await api('/admin/users');
   const tb = document.getElementById('users-body');
   tb.innerHTML = users.map(u => `<tr>
-    <td>${u.id}</td><td>${u.username}</td><td><code style="font-size:11px">${u.api_key}</code></td>
+    <td>${u.id}</td><td>${u.username}</td><td>${u.email || '-'}</td><td><code style="font-size:11px">${u.api_key}</code></td>
     <td>${u.is_admin ? 'Yes' : 'No'}</td>
     <td><button class="btn-danger btn-sm" onclick="deleteUser(${u.id})">Delete</button></td>
   </tr>`).join('');
@@ -177,6 +178,7 @@ async function loadUsers() {
 async function createUser() {
   await api('/admin/users', { method:'POST', body: JSON.stringify({
     username: document.getElementById('new-user').value,
+    email: document.getElementById('new-email').value || null,
     password: document.getElementById('new-pass').value,
     is_admin: document.getElementById('new-admin').checked
   })});
