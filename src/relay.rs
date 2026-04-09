@@ -40,7 +40,11 @@ async fn try_upstream(
     auth: &str,
     body: &str,
 ) -> Result<reqwest::Response, StatusCode> {
-    reqwest::Client::new()
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap()
         .post(url)
         .header("Content-Type", "application/json")
         .header("Authorization", auth)
