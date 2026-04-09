@@ -106,7 +106,11 @@ pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AuthReq>,
 ) -> Result<Json<AuthResp>, StatusCode> {
-    let user = db::find_user_by_username(&state.db, &req.username).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
+    // Try username first, then email
+    let user = match db::find_user_by_username(&state.db, &req.username).await {
+        Ok(u) => u,
+        Err(_) => db::find_user_by_email(&state.db, &req.username).await.map_err(|_| StatusCode::UNAUTHORIZED)?,
+    };
     if !verify_password(&req.password, &user.password_hash) {
         return Err(StatusCode::UNAUTHORIZED);
     }

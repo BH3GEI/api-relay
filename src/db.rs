@@ -110,6 +110,10 @@ pub async fn find_user_by_username(pool: &SqlitePool, username: &str) -> Result<
     sqlx::query_as("SELECT * FROM users WHERE username = ?").bind(username).fetch_one(pool).await
 }
 
+pub async fn find_user_by_email(pool: &SqlitePool, email: &str) -> Result<User, sqlx::Error> {
+    sqlx::query_as("SELECT * FROM users WHERE email = ?").bind(email).fetch_one(pool).await
+}
+
 pub async fn find_user_by_api_key(pool: &SqlitePool, api_key: &str) -> Result<User, sqlx::Error> {
     sqlx::query_as("SELECT * FROM users WHERE api_key = ?").bind(api_key).fetch_one(pool).await
 }
