@@ -77,7 +77,18 @@ th { color: #888; font-weight: 600; }
       <input id="p-key" placeholder="API Key (optional)" style="width:180px">
       <button onclick="createProvider()">Add</button>
     </div>
-    <table><thead><tr><th>ID</th><th>Name</th><th>Base URL</th><th>User-Agent</th><th>API Key</th><th>Enabled</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>
+    <table><thead><tr><th>ID</th><th>Name</th><th>Base URL</th><th>User-Agent</th><th>Enabled</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>
+
+    <div id="keys-section" class="hidden" style="margin-top:16px;padding-top:16px;border-top:1px solid #333">
+      <h2 id="keys-title">Keys</h2>
+      <div style="margin-bottom:12px">
+        <input id="k-key" placeholder="API Key" style="width:280px">
+        <input id="k-label" placeholder="Label (optional)" style="width:120px">
+        <input id="k-priority" placeholder="Priority" value="0" style="width:60px" type="number">
+        <button onclick="createKey()">Add Key</button>
+      </div>
+      <table><thead><tr><th>ID</th><th>Label</th><th>API Key</th><th>Priority</th><th></th></tr></thead><tbody id="keys-body"></tbody></table>
+    </div>
   </div>
 
   <!-- Models -->
@@ -183,9 +194,11 @@ async function loadProviders() {
   const tb = document.getElementById('providers-body');
   tb.innerHTML = providers.map(p => `<tr>
     <td>${p.id}</td><td>${p.name}</td><td>${p.base_url}</td><td>${p.user_agent}</td>
-    <td><code style="font-size:11px">${p.api_key ? '***' + p.api_key.slice(-6) : '-'}</code></td>
     <td>${p.enabled ? 'Yes' : 'No'}</td>
-    <td><button class="btn-danger btn-sm" onclick="deleteProvider(${p.id})">Delete</button></td>
+    <td>
+      <button class="btn-sm secondary" onclick="showKeys(${p.id},'${p.name}')">Keys</button>
+      <button class="btn-danger btn-sm" onclick="deleteProvider(${p.id})">Delete</button>
+    </td>
   </tr>`).join('');
   // Update model provider select
   const sel = document.getElementById('m-provider');
@@ -233,6 +246,35 @@ async function deleteModel(id) {
   if (!confirm('Delete model?')) return;
   await api('/admin/models/'+id, { method:'DELETE' });
   loadModels();
+}
+
+// Keys
+let currentProviderId = null;
+async function showKeys(pid, pname) {
+  currentProviderId = pid;
+  document.getElementById('keys-title').textContent = `Keys for "${pname}"`;
+  document.getElementById('keys-section').classList.remove('hidden');
+  const keys = await api(`/admin/keys/${pid}`);
+  const tb = document.getElementById('keys-body');
+  tb.innerHTML = keys.map(k => `<tr>
+    <td>${k.id}</td><td>${k.label || '-'}</td>
+    <td><code style="font-size:11px">***${k.api_key.slice(-8)}</code></td>
+    <td>${k.priority}</td>
+    <td><button class="btn-danger btn-sm" onclick="deleteKey(${k.id})">Delete</button></td>
+  </tr>`).join('');
+}
+async function createKey() {
+  await api(`/admin/providers/${currentProviderId}/keys`, { method:'POST', body: JSON.stringify({
+    api_key: document.getElementById('k-key').value,
+    label: document.getElementById('k-label').value || null,
+    priority: parseInt(document.getElementById('k-priority').value) || 0
+  })});
+  showKeys(currentProviderId, document.getElementById('keys-title').textContent.replace('Keys for "','').replace('"',''));
+}
+async function deleteKey(id) {
+  if (!confirm('Delete key?')) return;
+  await api('/admin/keys/delete/'+id, { method:'DELETE' });
+  showKeys(currentProviderId, document.getElementById('keys-title').textContent.replace('Keys for "','').replace('"',''));
 }
 
 function logout() {

@@ -31,13 +31,23 @@ pub struct Model {
     pub upstream_path: String,
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+pub struct ProviderKey {
+    pub id: i64,
+    pub provider_id: i64,
+    pub api_key: String,
+    pub label: String,
+    pub enabled: bool,
+    pub priority: i64,
+}
+
 #[derive(sqlx::FromRow)]
 pub struct ModelWithProvider {
     pub upstream_model: String,
     pub upstream_path: String,
     pub base_url: String,
     pub user_agent: String,
-    pub provider_api_key: Option<String>,
+    pub provider_id: i64,
 }
 
 pub async fn migrate(pool: &SqlitePool) {
@@ -60,6 +70,17 @@ pub async fn migrate(pool: &SqlitePool) {
             user_agent TEXT NOT NULL,
             api_key TEXT,
             enabled BOOLEAN DEFAULT TRUE
+        )"
+    ).execute(pool).await.unwrap();
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS provider_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+            api_key TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            enabled BOOLEAN DEFAULT TRUE,
+            priority INTEGER DEFAULT 0
         )"
     ).execute(pool).await.unwrap();
 
@@ -157,8 +178,32 @@ pub async fn delete_model(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error>
 
 pub async fn resolve_model(pool: &SqlitePool, public_name: &str) -> Result<ModelWithProvider, sqlx::Error> {
     sqlx::query_as(
-        "SELECT m.upstream_model, m.upstream_path, p.base_url, p.user_agent, p.api_key as provider_api_key
+        "SELECT m.upstream_model, m.upstream_path, p.base_url, p.user_agent, p.id as provider_id
          FROM models m JOIN providers p ON m.provider_id = p.id
          WHERE m.public_name = ? AND p.enabled = TRUE"
     ).bind(public_name).fetch_one(pool).await
+}
+
+pub async fn get_provider_keys(pool: &SqlitePool, provider_id: i64) -> Result<Vec<ProviderKey>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT * FROM provider_keys WHERE provider_id = ? AND enabled = TRUE ORDER BY priority ASC, id ASC"
+    ).bind(provider_id).fetch_all(pool).await
+}
+
+// ── Provider Keys CRUD ──
+
+pub async fn list_provider_keys(pool: &SqlitePool, provider_id: i64) -> Result<Vec<ProviderKey>, sqlx::Error> {
+    sqlx::query_as("SELECT * FROM provider_keys WHERE provider_id = ? ORDER BY priority ASC, id ASC")
+        .bind(provider_id).fetch_all(pool).await
+}
+
+pub async fn create_provider_key(pool: &SqlitePool, provider_id: i64, api_key: &str, label: &str, priority: i64) -> Result<ProviderKey, sqlx::Error> {
+    sqlx::query_as(
+        "INSERT INTO provider_keys (provider_id, api_key, label, priority) VALUES (?, ?, ?, ?) RETURNING *"
+    ).bind(provider_id).bind(api_key).bind(label).bind(priority).fetch_one(pool).await
+}
+
+pub async fn delete_provider_key(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM provider_keys WHERE id = ?").bind(id).execute(pool).await?;
+    Ok(())
 }

@@ -42,11 +42,13 @@ async fn main() {
         .route("/v1/models", get(relay::list_models))
         .route("/v1/chat/completions", post(relay::chat_completions))
         .route("/admin/users", get(admin_list_users).post(admin_create_user))
-        .route("/admin/users/{id}", delete(admin_delete_user))
+        .route("/admin/users/:id", delete(admin_delete_user))
         .route("/admin/providers", get(admin_list_providers).post(admin_create_provider))
-        .route("/admin/providers/{id}", put(admin_update_provider).delete(admin_delete_provider))
+        .route("/admin/providers/:id", put(admin_update_provider).delete(admin_delete_provider))
+        .route("/admin/keys/:provider_id", get(admin_list_provider_keys).post(admin_create_provider_key))
+        .route("/admin/keys/delete/:id", delete(admin_delete_provider_key))
         .route("/admin/models", get(admin_list_models).post(admin_create_model))
-        .route("/admin/models/{id}", put(admin_update_model).delete(admin_delete_model))
+        .route("/admin/models/:id", put(admin_update_model).delete(admin_delete_model))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -134,5 +136,27 @@ async fn admin_update_model(State(state): State<Arc<AppState>>, headers: HeaderM
 async fn admin_delete_model(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(id): Path<i64>) -> Result<StatusCode, StatusCode> {
     auth::require_admin(&state, &headers).await?;
     db::delete_model(&state.db, id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Provider Keys ──
+
+async fn admin_list_provider_keys(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(provider_id): Path<i64>) -> Result<Json<Vec<db::ProviderKey>>, StatusCode> {
+    auth::require_admin(&state, &headers).await?;
+    db::list_provider_keys(&state.db, provider_id).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[derive(Deserialize)]
+struct ProviderKeyReq { api_key: String, label: Option<String>, priority: Option<i64> }
+
+async fn admin_create_provider_key(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(provider_id): Path<i64>, Json(req): Json<ProviderKeyReq>) -> Result<Json<db::ProviderKey>, StatusCode> {
+    auth::require_admin(&state, &headers).await?;
+    db::create_provider_key(&state.db, provider_id, &req.api_key, req.label.as_deref().unwrap_or(""), req.priority.unwrap_or(0))
+        .await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn admin_delete_provider_key(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(id): Path<i64>) -> Result<StatusCode, StatusCode> {
+    auth::require_admin(&state, &headers).await?;
+    db::delete_provider_key(&state.db, id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::NO_CONTENT)
 }
