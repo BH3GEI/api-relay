@@ -144,6 +144,85 @@ pub async fn anthropic_messages(
     relay_with_fallback(&state, &headers, &body, true).await
 }
 
+pub async fn image_generations(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, StatusCode> {
+    relay_generic(&state, &headers, &body, "/v1beta/openai/images/generations").await
+}
+
+pub async fn video_generations(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, StatusCode> {
+    relay_generic(&state, &headers, &body, "").await
+}
+
+/// Generic relay for non-chat endpoints (images, videos).
+/// For videos, uses Google's native predict endpoint.
+async fn relay_generic(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &str,
+    override_path: &str,
+) -> Result<Response, StatusCode> {
+    let api_key = extract_api_key(headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    let mut body_json: Value = serde_json::from_str(body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let model_name = body_json["model"].as_str().ok_or(StatusCode::BAD_REQUEST)?.to_string();
+
+    let resolved = db::resolve_model(&state.db, &model_name).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    body_json["model"] = Value::String(resolved.upstream_model.clone());
+
+    let url = if override_path.is_empty() {
+        // Video: use native Google predict endpoint
+        format!("{}/v1beta/models/{}:predictLongRunning",
+            resolved.base_url.trim_end_matches('/'), resolved.upstream_model)
+    } else {
+        format!("{}{}", resolved.base_url.trim_end_matches('/'), override_path)
+    };
+
+    let body_str = body_json.to_string();
+
+    let mut keys: Vec<String> = Vec::new();
+    if let Ok(provider_keys) = db::get_provider_keys(&state.db, resolved.provider_id).await {
+        for pk in &provider_keys {
+            keys.push(pk.api_key.clone());
+        }
+    }
+    if keys.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut last_resp = None;
+    for key in &keys {
+        let mut req = state.http_client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("User-Agent", &resolved.user_agent)
+            .body(body_str.clone());
+
+        if override_path.is_empty() {
+            // Native Google API uses x-goog-api-key
+            req = req.header("x-goog-api-key", key.as_str());
+        } else {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+
+        let resp = req.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+        let status_code = resp.status().as_u16();
+        if !RETRY_STATUSES.contains(&status_code) {
+            return stream_response(resp);
+        }
+        last_resp = Some(resp);
+    }
+
+    stream_response(last_resp.unwrap())
+}
+
 fn stream_response(resp: reqwest::Response) -> Result<Response, StatusCode> {
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let content_type = resp.headers().get("content-type").cloned();
