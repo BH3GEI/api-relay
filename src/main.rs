@@ -18,6 +18,7 @@ mod relay;
 pub struct AppState {
     pub db: SqlitePool,
     pub jwt_secret: String,
+    pub http_client: reqwest::Client,
 }
 
 #[tokio::main]
@@ -29,7 +30,14 @@ async fn main() {
     let pool = SqlitePool::connect(&db_url).await.expect("Failed to connect to database");
     db::migrate(&pool).await;
 
-    let state = Arc::new(AppState { db: pool, jwt_secret });
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
+        .pool_max_idle_per_host(20)
+        .build()
+        .unwrap();
+
+    let state = Arc::new(AppState { db: pool, jwt_secret, http_client });
 
     let app = Router::new()
         .route("/", get(page_index))

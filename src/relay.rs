@@ -47,18 +47,13 @@ pub async fn list_models(
 const RETRY_STATUSES: &[u16] = &[401, 403, 429, 503];
 
 async fn try_upstream(
+    client: &reqwest::Client,
     url: &str,
     user_agent: &str,
     key: &str,
     body: &str,
     use_anthropic_auth: bool,
 ) -> Result<reqwest::Response, StatusCode> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .unwrap();
-
     let mut req = client
         .post(url)
         .header("Content-Type", "application/json")
@@ -121,7 +116,7 @@ async fn relay_with_fallback(
     // Try each key with fallback
     let mut last_resp = None;
     for key in &keys {
-        let resp = try_upstream(&url, &resolved.user_agent, key, &body_str, use_anthropic_auth).await?;
+        let resp = try_upstream(&state.http_client, &url, &resolved.user_agent, key, &body_str, use_anthropic_auth).await?;
         let status_code = resp.status().as_u16();
 
         if !RETRY_STATUSES.contains(&status_code) {
