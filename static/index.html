@@ -26,6 +26,8 @@ pre { background: #111; padding: 12px; border-radius: 6px; overflow-x: auto; fon
 .msg { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }
 .msg.error { background: #3b1111; color: #f87171; }
 .msg.ok { background: #0f2b1a; color: #4ade80; }
+.tab { padding: 8px 16px; border-radius: 6px; background: #222; color: #aaa; cursor: pointer; border: none; font-size: 14px; }
+.tab.active { background: #2563eb; color: #fff; }
 </style>
 </head>
 <body>
@@ -35,14 +37,25 @@ pre { background: #111; padding: 12px; border-radius: 6px; overflow-x: auto; fon
 <!-- Auth section -->
 <div id="auth-section">
   <div class="card">
-    <h2>Login / Register</h2>
-    <input id="username" placeholder="Username">
-    <input id="email" type="email" placeholder="Email">
-    <input id="password" type="password" placeholder="Password">
-    <div style="display:flex;gap:8px">
-      <button onclick="login()">Login</button>
-      <button class="secondary" onclick="register()">Register</button>
+    <div style="display:flex;gap:4px;margin-bottom:16px">
+      <button class="tab active" id="tab-login-btn" onclick="showAuthTab('login')">Login</button>
+      <button class="tab" id="tab-register-btn" onclick="showAuthTab('register')">Register</button>
     </div>
+
+    <div id="login-form">
+      <input id="login-username" placeholder="Username">
+      <input id="login-password" type="password" placeholder="Password">
+      <button onclick="login()">Login</button>
+    </div>
+
+    <div id="register-form" class="hidden">
+      <input id="reg-username" placeholder="Username">
+      <input id="reg-email" type="email" placeholder="Email">
+      <input id="reg-password" type="password" placeholder="Password">
+      <input id="reg-password2" type="password" placeholder="Confirm Password">
+      <button onclick="register()">Register</button>
+    </div>
+
     <div id="auth-msg" class="msg hidden"></div>
   </div>
 </div>
@@ -98,11 +111,19 @@ async function api(path, opts = {}) {
   return r.json();
 }
 
+function showAuthTab(tab) {
+  document.getElementById('login-form').classList.toggle('hidden', tab !== 'login');
+  document.getElementById('register-form').classList.toggle('hidden', tab !== 'register');
+  document.getElementById('tab-login-btn').classList.toggle('active', tab === 'login');
+  document.getElementById('tab-register-btn').classList.toggle('active', tab === 'register');
+  document.getElementById('auth-msg').classList.add('hidden');
+}
+
 async function login() {
   try {
     const res = await api('/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ username: document.getElementById('username').value, password: document.getElementById('password').value })
+      body: JSON.stringify({ username: document.getElementById('login-username').value, password: document.getElementById('login-password').value })
     });
     token = res.token;
     apiKey = res.api_key;
@@ -112,10 +133,13 @@ async function login() {
 }
 
 async function register() {
+  const pw = document.getElementById('reg-password').value;
+  const pw2 = document.getElementById('reg-password2').value;
+  if (pw !== pw2) { showMsg('auth-msg', 'Passwords do not match', false); return; }
   try {
     const res = await api('/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ username: document.getElementById('username').value, email: document.getElementById('email').value, password: document.getElementById('password').value })
+      body: JSON.stringify({ username: document.getElementById('reg-username').value, email: document.getElementById('reg-email').value, password: pw })
     });
     token = res.token;
     apiKey = res.api_key;
