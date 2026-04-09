@@ -52,6 +52,10 @@ async fn main() {
         .route("/v1/messages", post(relay::anthropic_messages))
         .route("/v1/images/generations", post(relay::image_generations))
         .route("/v1/videos/generations", post(relay::video_generations))
+        .route("/user/usage", get(user_usage))
+        .route("/admin/usage", get(admin_usage))
+        .route("/admin/limits", get(admin_list_limits).post(admin_create_limit))
+        .route("/admin/limits/:id", delete(admin_delete_limit))
         .route("/admin/users", get(admin_list_users).post(admin_create_user))
         .route("/admin/users/:id", delete(admin_delete_user))
         .route("/admin/providers", get(admin_list_providers).post(admin_create_provider))
@@ -169,5 +173,39 @@ async fn admin_create_provider_key(State(state): State<Arc<AppState>>, headers: 
 async fn admin_delete_provider_key(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(id): Path<i64>) -> Result<StatusCode, StatusCode> {
     auth::require_admin(&state, &headers).await?;
     db::delete_provider_key(&state.db, id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Usage & Limits ──
+
+async fn user_usage(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Vec<db::UsageStats>>, StatusCode> {
+    let token = auth::extract_bearer(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let claims = auth::decode_jwt(&state, &token)?;
+    let user = db::find_user_by_username(&state.db, &claims.sub).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    db::get_user_usage_today(&state.db, user.id).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn admin_usage(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Vec<db::AdminUsageStats>>, StatusCode> {
+    auth::require_admin(&state, &headers).await?;
+    db::get_all_usage_today(&state.db).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn admin_list_limits(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Vec<db::UsageLimit>>, StatusCode> {
+    auth::require_admin(&state, &headers).await?;
+    db::list_limits(&state.db).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[derive(Deserialize)]
+struct LimitReq { user_id: i64, model: Option<String>, max_requests_daily: Option<i64>, max_tokens_daily: Option<i64> }
+
+async fn admin_create_limit(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(req): Json<LimitReq>) -> Result<Json<db::UsageLimit>, StatusCode> {
+    auth::require_admin(&state, &headers).await?;
+    db::create_limit(&state.db, req.user_id, req.model.as_deref().unwrap_or("*"), req.max_requests_daily.unwrap_or(-1), req.max_tokens_daily.unwrap_or(-1))
+        .await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn admin_delete_limit(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(id): Path<i64>) -> Result<StatusCode, StatusCode> {
+    auth::require_admin(&state, &headers).await?;
+    db::delete_limit(&state.db, id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::NO_CONTENT)
 }

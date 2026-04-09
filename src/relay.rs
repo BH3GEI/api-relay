@@ -79,15 +79,23 @@ async fn relay_with_fallback(
 ) -> Result<Response, StatusCode> {
     // Auth
     let api_key = extract_api_key(headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let user = db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     // Parse body
     let mut body_json: Value = serde_json::from_str(body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let model_name = body_json["model"].as_str().ok_or(StatusCode::BAD_REQUEST)?.to_string();
 
+    // Check rate limit
+    let allowed = db::check_limit(&state.db, user.id, &model_name).await.unwrap_or(true);
+    if !allowed {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
     // Resolve model
     let resolved = db::resolve_model(&state.db, &model_name).await.map_err(|_| StatusCode::NOT_FOUND)?;
     body_json["model"] = Value::String(resolved.upstream_model.clone());
+
+    let is_stream = body_json.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // For Anthropic format, use upstream's messages path; for OpenAI, use configured path
     let upstream_path = if use_anthropic_auth {
@@ -120,6 +128,25 @@ async fn relay_with_fallback(
         let status_code = resp.status().as_u16();
 
         if !RETRY_STATUSES.contains(&status_code) {
+            // Log usage
+            if status_code >= 200 && status_code < 300 {
+                if is_stream {
+                    // Streaming: log request count only, can't read tokens
+                    let _ = db::log_usage(&state.db, user.id, &model_name, 0, 0).await;
+                    return stream_response(resp);
+                } else {
+                    // Non-streaming: read body, extract tokens, then return
+                    let resp_bytes = resp.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+                    let (input_t, output_t) = extract_tokens(&resp_bytes);
+                    let _ = db::log_usage(&state.db, user.id, &model_name, input_t, output_t).await;
+                    let resp_status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK);
+                    return Ok(Response::builder()
+                        .status(resp_status)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(resp_bytes))
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
+                }
+            }
             return stream_response(resp);
         }
         last_resp = Some(resp);
@@ -169,10 +196,16 @@ async fn relay_generic(
     override_path: &str,
 ) -> Result<Response, StatusCode> {
     let api_key = extract_api_key(headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let user = db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     let mut body_json: Value = serde_json::from_str(body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let model_name = body_json["model"].as_str().ok_or(StatusCode::BAD_REQUEST)?.to_string();
+
+    // Check rate limit
+    let allowed = db::check_limit(&state.db, user.id, &model_name).await.unwrap_or(true);
+    if !allowed {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
 
     let resolved = db::resolve_model(&state.db, &model_name).await.map_err(|_| StatusCode::NOT_FOUND)?;
     body_json["model"] = Value::String(resolved.upstream_model.clone());
@@ -215,12 +248,30 @@ async fn relay_generic(
         let resp = req.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
         let status_code = resp.status().as_u16();
         if !RETRY_STATUSES.contains(&status_code) {
+            if status_code >= 200 && status_code < 300 {
+                let _ = db::log_usage(&state.db, user.id, &model_name, 0, 0).await;
+            }
             return stream_response(resp);
         }
         last_resp = Some(resp);
     }
 
     stream_response(last_resp.unwrap())
+}
+
+fn extract_tokens(body: &[u8]) -> (i64, i64) {
+    if let Ok(json) = serde_json::from_slice::<Value>(body) {
+        let usage = &json["usage"];
+        let input = usage["prompt_tokens"].as_i64()
+            .or_else(|| usage["input_tokens"].as_i64())
+            .unwrap_or(0);
+        let output = usage["completion_tokens"].as_i64()
+            .or_else(|| usage["output_tokens"].as_i64())
+            .unwrap_or(0);
+        (input, output)
+    } else {
+        (0, 0)
+    }
 }
 
 fn stream_response(resp: reqwest::Response) -> Result<Response, StatusCode> {

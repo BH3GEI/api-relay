@@ -151,6 +151,14 @@ a:hover { text-decoration: underline; }
     </div>
   </div>
 
+  <!-- Usage -->
+  <div class="card">
+    <h2>Today's Usage</h2>
+    <table class="config-table" id="usage-table">
+      <tr><td>Loading...</td><td></td></tr>
+    </table>
+  </div>
+
   <!-- API Key -->
   <div class="card">
     <h2>Your API Key</h2>
@@ -275,6 +283,20 @@ async function loadDashboard() {
     document.getElementById('api-key-display').textContent = apiKey;
     document.getElementById('cfg-base').textContent = BASE;
     document.getElementById('cfg-key').textContent = apiKey;
+
+    // Load usage
+    try {
+      const usageData = await api('/user/usage');
+      const ut = document.getElementById('usage-table');
+      if (usageData.length === 0) {
+        ut.innerHTML = '<tr><td style="color:#666">No usage today</td><td></td></tr>';
+      } else {
+        let totalReq = 0, totalTok = 0;
+        ut.innerHTML = '<tr><th style="color:#888;font-weight:600">Model</th><th style="color:#888;font-weight:600">Requests / Tokens</th></tr>' +
+          usageData.map(u => { totalReq += u.requests; totalTok += u.total_tokens; return `<tr><td>${u.model}</td><td>${u.requests} req / ${u.total_tokens} tok</td></tr>`; }).join('') +
+          `<tr style="border-top:2px solid #333"><td><strong>Total</strong></td><td><strong>${totalReq} req / ${totalTok} tok</strong></td></tr>`;
+      }
+    } catch(e) {}
 
     const modelsRes = await fetch(BASE + '/models', { headers: { 'Authorization': 'Bearer ' + apiKey } });
     const models = await modelsRes.json();

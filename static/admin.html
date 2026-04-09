@@ -53,6 +53,8 @@ th { color: #888; font-weight: 600; }
     <button class="tab active" onclick="showTab('users')">Users</button>
     <button class="tab" onclick="showTab('providers')">Providers</button>
     <button class="tab" onclick="showTab('models')">Models</button>
+    <button class="tab" onclick="showTab('usage')">Usage</button>
+    <button class="tab" onclick="showTab('limits')">Limits</button>
   </div>
 
   <!-- Users -->
@@ -103,6 +105,25 @@ th { color: #888; font-weight: 600; }
       <button onclick="createModel()">Add</button>
     </div>
     <table><thead><tr><th>ID</th><th>Public Name</th><th>Provider</th><th>Upstream Model</th><th>Path</th><th></th></tr></thead><tbody id="models-body"></tbody></table>
+  </div>
+
+  <!-- Usage -->
+  <div id="tab-usage" class="card hidden">
+    <h2>Today's Usage</h2>
+    <table><thead><tr><th>User</th><th>Model</th><th>Requests</th><th>Tokens</th></tr></thead><tbody id="usage-body"></tbody></table>
+  </div>
+
+  <!-- Limits -->
+  <div id="tab-limits" class="card hidden">
+    <h2>Usage Limits</h2>
+    <div style="margin-bottom:12px">
+      <select id="lim-user"></select>
+      <input id="lim-model" placeholder="Model (* = all)" value="*" style="width:140px">
+      <input id="lim-req" placeholder="Max req/day (-1=∞)" value="-1" style="width:130px" type="number">
+      <input id="lim-tok" placeholder="Max tok/day (-1=∞)" value="-1" style="width:130px" type="number">
+      <button onclick="createLimit()">Set Limit</button>
+    </div>
+    <table><thead><tr><th>ID</th><th>User</th><th>Model</th><th>Max Req/Day</th><th>Max Tok/Day</th><th></th></tr></thead><tbody id="limits-body"></tbody></table>
   </div>
 
   <div style="margin-top:20px"><button class="secondary" onclick="logout()">Logout</button></div>
@@ -158,7 +179,9 @@ async function loadAdmin() {
 }
 
 function showTab(name) {
-  ['users','providers','models'].forEach(t => {
+  if (name === 'usage') loadUsage();
+  if (name === 'limits') loadLimits();
+  ['users','providers','models','usage','limits'].forEach(t => {
     document.getElementById('tab-'+t).classList.toggle('hidden', t !== name);
   });
   document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
@@ -248,6 +271,42 @@ async function deleteModel(id) {
   if (!confirm('Delete model?')) return;
   await api('/admin/models/'+id, { method:'DELETE' });
   loadModels();
+}
+
+// Usage
+async function loadUsage() {
+  const usage = await api('/admin/usage');
+  document.getElementById('usage-body').innerHTML = usage.map(u =>
+    `<tr><td>${u.username}</td><td>${u.model}</td><td>${u.requests}</td><td>${u.total_tokens}</td></tr>`
+  ).join('') || '<tr><td colspan="4" style="color:#666">No usage today</td></tr>';
+}
+
+// Limits
+let allUsers = [];
+async function loadLimits() {
+  const limits = await api('/admin/limits');
+  if (!allUsers.length) {
+    allUsers = await api('/admin/users');
+    document.getElementById('lim-user').innerHTML = allUsers.map(u => `<option value="${u.id}">${u.username}</option>`).join('');
+  }
+  document.getElementById('limits-body').innerHTML = limits.map(l => {
+    const uname = allUsers.find(u => u.id === l.user_id)?.username || l.user_id;
+    return `<tr><td>${l.id}</td><td>${uname}</td><td>${l.model}</td><td>${l.max_requests_daily < 0 ? '∞' : l.max_requests_daily}</td><td>${l.max_tokens_daily < 0 ? '∞' : l.max_tokens_daily}</td><td><button class="btn-danger btn-sm" onclick="deleteLimit(${l.id})">Delete</button></td></tr>`;
+  }).join('') || '<tr><td colspan="6" style="color:#666">No limits set</td></tr>';
+}
+async function createLimit() {
+  await api('/admin/limits', { method:'POST', body: JSON.stringify({
+    user_id: parseInt(document.getElementById('lim-user').value),
+    model: document.getElementById('lim-model').value || '*',
+    max_requests_daily: parseInt(document.getElementById('lim-req').value) || -1,
+    max_tokens_daily: parseInt(document.getElementById('lim-tok').value) || -1
+  })});
+  loadLimits();
+}
+async function deleteLimit(id) {
+  if (!confirm('Delete limit?')) return;
+  await api('/admin/limits/'+id, { method:'DELETE' });
+  loadLimits();
 }
 
 // Keys
