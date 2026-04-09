@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API Relay Admin</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; padding: 40px 20px; }
+.container { max-width: 900px; margin: 0 auto; }
+h1 { font-size: 24px; margin-bottom: 8px; color: #fff; }
+h2 { font-size: 18px; margin: 24px 0 12px; color: #ccc; }
+.subtitle { color: #666; margin-bottom: 24px; }
+.card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+input, select { padding: 8px 10px; border: 1px solid #333; border-radius: 6px; background: #111; color: #fff; font-size: 14px; margin-right: 8px; margin-bottom: 8px; }
+button { padding: 8px 16px; border: none; border-radius: 6px; background: #2563eb; color: #fff; font-size: 13px; cursor: pointer; margin-right: 4px; }
+button:hover { background: #1d4ed8; }
+.btn-danger { background: #991b1b; }
+.btn-danger:hover { background: #7f1d1d; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.secondary { background: #333; }
+.secondary:hover { background: #444; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #222; }
+th { color: #888; font-weight: 600; }
+.hidden { display: none; }
+.msg { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }
+.msg.error { background: #3b1111; color: #f87171; }
+.msg.ok { background: #0f2b1a; color: #4ade80; }
+.tabs { display: flex; gap: 4px; margin-bottom: 20px; }
+.tab { padding: 8px 16px; border-radius: 6px; background: #222; color: #aaa; cursor: pointer; border: none; font-size: 14px; }
+.tab.active { background: #2563eb; color: #fff; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Admin Panel</h1>
+<p class="subtitle"><a href="/" style="color:#2563eb;text-decoration:none">&larr; Back</a></p>
+
+<!-- Login -->
+<div id="login-section">
+  <div class="card">
+    <input id="username" placeholder="Username">
+    <input id="password" type="password" placeholder="Password">
+    <button onclick="login()">Login</button>
+    <div id="login-msg" class="msg hidden"></div>
+  </div>
+</div>
+
+<!-- Admin content -->
+<div id="admin" class="hidden">
+  <div class="tabs">
+    <button class="tab active" onclick="showTab('users')">Users</button>
+    <button class="tab" onclick="showTab('providers')">Providers</button>
+    <button class="tab" onclick="showTab('models')">Models</button>
+  </div>
+
+  <!-- Users -->
+  <div id="tab-users" class="card">
+    <h2>Users</h2>
+    <div style="margin-bottom:12px">
+      <input id="new-user" placeholder="Username">
+      <input id="new-pass" type="password" placeholder="Password">
+      <label style="color:#888;font-size:13px"><input type="checkbox" id="new-admin"> Admin</label>
+      <button onclick="createUser()">Add User</button>
+    </div>
+    <table><thead><tr><th>ID</th><th>Username</th><th>API Key</th><th>Admin</th><th></th></tr></thead><tbody id="users-body"></tbody></table>
+  </div>
+
+  <!-- Providers -->
+  <div id="tab-providers" class="card hidden">
+    <h2>Providers</h2>
+    <div style="margin-bottom:12px">
+      <input id="p-name" placeholder="Name" style="width:100px">
+      <input id="p-url" placeholder="Base URL" style="width:200px">
+      <input id="p-ua" placeholder="User-Agent" style="width:160px">
+      <input id="p-key" placeholder="API Key (optional)" style="width:180px">
+      <button onclick="createProvider()">Add</button>
+    </div>
+    <table><thead><tr><th>ID</th><th>Name</th><th>Base URL</th><th>User-Agent</th><th>API Key</th><th>Enabled</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>
+  </div>
+
+  <!-- Models -->
+  <div id="tab-models" class="card hidden">
+    <h2>Model Mappings</h2>
+    <div style="margin-bottom:12px">
+      <input id="m-name" placeholder="Public Name" style="width:140px">
+      <select id="m-provider"></select>
+      <input id="m-upstream" placeholder="Upstream Model" style="width:160px">
+      <input id="m-path" placeholder="Path" value="/v1/chat/completions" style="width:180px">
+      <button onclick="createModel()">Add</button>
+    </div>
+    <table><thead><tr><th>ID</th><th>Public Name</th><th>Provider</th><th>Upstream Model</th><th>Path</th><th></th></tr></thead><tbody id="models-body"></tbody></table>
+  </div>
+
+  <div style="margin-top:20px"><button class="secondary" onclick="logout()">Logout</button></div>
+</div>
+</div>
+
+<script>
+const BASE = location.origin;
+let token = localStorage.getItem('admin_token');
+let providers = [];
+
+if (token) loadAdmin();
+
+function showMsg(id, msg, ok) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.className = 'msg ' + (ok ? 'ok' : 'error');
+  el.classList.remove('hidden');
+}
+
+async function api(path, opts = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const r = await fetch(BASE + path, { ...opts, headers });
+  if (!r.ok) throw new Error(await r.text() || r.statusText);
+  if (r.status === 204) return null;
+  return r.json();
+}
+
+async function login() {
+  try {
+    const res = await api('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: document.getElementById('username').value, password: document.getElementById('password').value })
+    });
+    token = res.token;
+    localStorage.setItem('admin_token', token);
+    loadAdmin();
+  } catch (e) { showMsg('login-msg', e.message, false); }
+}
+
+async function loadAdmin() {
+  document.getElementById('login-section').classList.add('hidden');
+  document.getElementById('admin').classList.remove('hidden');
+  try {
+    await loadUsers();
+    await loadProviders();
+    await loadModels();
+  } catch (e) {
+    token = null; localStorage.removeItem('admin_token');
+    location.reload();
+  }
+}
+
+function showTab(name) {
+  ['users','providers','models'].forEach(t => {
+    document.getElementById('tab-'+t).classList.toggle('hidden', t !== name);
+  });
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  event.target.classList.add('active');
+}
+
+// Users
+async function loadUsers() {
+  const users = await api('/admin/users');
+  const tb = document.getElementById('users-body');
+  tb.innerHTML = users.map(u => `<tr>
+    <td>${u.id}</td><td>${u.username}</td><td><code style="font-size:11px">${u.api_key}</code></td>
+    <td>${u.is_admin ? 'Yes' : 'No'}</td>
+    <td><button class="btn-danger btn-sm" onclick="deleteUser(${u.id})">Delete</button></td>
+  </tr>`).join('');
+}
+async function createUser() {
+  await api('/admin/users', { method:'POST', body: JSON.stringify({
+    username: document.getElementById('new-user').value,
+    password: document.getElementById('new-pass').value,
+    is_admin: document.getElementById('new-admin').checked
+  })});
+  loadUsers();
+}
+async function deleteUser(id) {
+  if (!confirm('Delete user?')) return;
+  await api('/admin/users/'+id, { method:'DELETE' });
+  loadUsers();
+}
+
+// Providers
+async function loadProviders() {
+  providers = await api('/admin/providers');
+  const tb = document.getElementById('providers-body');
+  tb.innerHTML = providers.map(p => `<tr>
+    <td>${p.id}</td><td>${p.name}</td><td>${p.base_url}</td><td>${p.user_agent}</td>
+    <td><code style="font-size:11px">${p.api_key ? '***' + p.api_key.slice(-6) : '-'}</code></td>
+    <td>${p.enabled ? 'Yes' : 'No'}</td>
+    <td><button class="btn-danger btn-sm" onclick="deleteProvider(${p.id})">Delete</button></td>
+  </tr>`).join('');
+  // Update model provider select
+  const sel = document.getElementById('m-provider');
+  sel.innerHTML = providers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+}
+async function createProvider() {
+  const key = document.getElementById('p-key').value;
+  await api('/admin/providers', { method:'POST', body: JSON.stringify({
+    name: document.getElementById('p-name').value,
+    base_url: document.getElementById('p-url').value,
+    user_agent: document.getElementById('p-ua').value,
+    api_key: key || null,
+    enabled: true
+  })});
+  loadProviders();
+}
+async function deleteProvider(id) {
+  if (!confirm('Delete provider?')) return;
+  await api('/admin/providers/'+id, { method:'DELETE' });
+  loadProviders();
+}
+
+// Models
+async function loadModels() {
+  const models = await api('/admin/models');
+  const tb = document.getElementById('models-body');
+  tb.innerHTML = models.map(m => {
+    const pname = providers.find(p => p.id === m.provider_id)?.name || m.provider_id;
+    return `<tr>
+      <td>${m.id}</td><td>${m.public_name}</td><td>${pname}</td><td>${m.upstream_model}</td><td>${m.upstream_path}</td>
+      <td><button class="btn-danger btn-sm" onclick="deleteModel(${m.id})">Delete</button></td>
+    </tr>`;
+  }).join('');
+}
+async function createModel() {
+  await api('/admin/models', { method:'POST', body: JSON.stringify({
+    public_name: document.getElementById('m-name').value,
+    provider_id: parseInt(document.getElementById('m-provider').value),
+    upstream_model: document.getElementById('m-upstream').value,
+    upstream_path: document.getElementById('m-path').value
+  })});
+  loadModels();
+}
+async function deleteModel(id) {
+  if (!confirm('Delete model?')) return;
+  await api('/admin/models/'+id, { method:'DELETE' });
+  loadModels();
+}
+
+function logout() {
+  token = null;
+  localStorage.removeItem('admin_token');
+  location.reload();
+}
+</script>
+</body>
+</html>

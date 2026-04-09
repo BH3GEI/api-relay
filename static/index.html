@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API Relay</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; display: flex; justify-content: center; padding: 40px 20px; }
+.container { max-width: 600px; width: 100%; }
+h1 { font-size: 24px; margin-bottom: 24px; color: #fff; }
+h2 { font-size: 18px; margin: 24px 0 12px; color: #ccc; }
+.card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+input { width: 100%; padding: 10px 12px; border: 1px solid #333; border-radius: 6px; background: #111; color: #fff; font-size: 14px; margin-bottom: 12px; }
+button { padding: 10px 20px; border: none; border-radius: 6px; background: #2563eb; color: #fff; font-size: 14px; cursor: pointer; }
+button:hover { background: #1d4ed8; }
+.secondary { background: #333; }
+.secondary:hover { background: #444; }
+code { background: #111; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+pre { background: #111; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; margin: 8px 0; }
+.hidden { display: none; }
+.key-display { display: flex; align-items: center; gap: 8px; }
+.key-display code { flex: 1; padding: 10px; font-size: 14px; }
+.model-list { list-style: none; }
+.model-list li { padding: 8px 12px; border-bottom: 1px solid #222; font-family: monospace; }
+.msg { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }
+.msg.error { background: #3b1111; color: #f87171; }
+.msg.ok { background: #0f2b1a; color: #4ade80; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>API Relay</h1>
+
+<!-- Auth section -->
+<div id="auth-section">
+  <div class="card">
+    <h2>Login / Register</h2>
+    <input id="username" placeholder="Username">
+    <input id="password" type="password" placeholder="Password">
+    <div style="display:flex;gap:8px">
+      <button onclick="login()">Login</button>
+      <button class="secondary" onclick="register()">Register</button>
+    </div>
+    <div id="auth-msg" class="msg hidden"></div>
+  </div>
+</div>
+
+<!-- Dashboard -->
+<div id="dashboard" class="hidden">
+  <div class="card">
+    <h2>Your API Key</h2>
+    <div class="key-display">
+      <code id="api-key-display">loading...</code>
+      <button class="secondary" onclick="copyKey()">Copy</button>
+    </div>
+    <div style="margin-top:12px">
+      <button class="secondary" onclick="refreshKey()">Regenerate Key</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Available Models</h2>
+    <ul class="model-list" id="model-list"></ul>
+  </div>
+
+  <div class="card">
+    <h2>Usage</h2>
+    <pre id="usage-example">loading...</pre>
+  </div>
+
+  <div style="margin-top:16px">
+    <button class="secondary" onclick="logout()">Logout</button>
+  </div>
+</div>
+</div>
+
+<script>
+const BASE = location.origin;
+let token = localStorage.getItem('token');
+let apiKey = '';
+
+if (token) loadDashboard();
+
+function showMsg(id, msg, ok) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.className = 'msg ' + (ok ? 'ok' : 'error');
+  el.classList.remove('hidden');
+}
+
+async function api(path, opts = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const r = await fetch(BASE + path, { ...opts, headers });
+  if (!r.ok) throw new Error(await r.text() || r.statusText);
+  return r.json();
+}
+
+async function login() {
+  try {
+    const res = await api('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: document.getElementById('username').value, password: document.getElementById('password').value })
+    });
+    token = res.token;
+    apiKey = res.api_key;
+    localStorage.setItem('token', token);
+    loadDashboard();
+  } catch (e) { showMsg('auth-msg', 'Login failed: ' + e.message, false); }
+}
+
+async function register() {
+  try {
+    const res = await api('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ username: document.getElementById('username').value, password: document.getElementById('password').value })
+    });
+    token = res.token;
+    apiKey = res.api_key;
+    localStorage.setItem('token', token);
+    loadDashboard();
+  } catch (e) { showMsg('auth-msg', 'Register failed: ' + e.message, false); }
+}
+
+async function loadDashboard() {
+  document.getElementById('auth-section').classList.add('hidden');
+  document.getElementById('dashboard').classList.remove('hidden');
+  try {
+    const keyRes = await api('/user/api-key');
+    apiKey = keyRes.api_key;
+    document.getElementById('api-key-display').textContent = apiKey;
+
+    const modelsRes = await fetch(BASE + '/models', { headers: { 'Authorization': 'Bearer ' + apiKey } });
+    const models = await modelsRes.json();
+    const list = document.getElementById('model-list');
+    list.innerHTML = '';
+    (models.data || []).forEach(m => {
+      const li = document.createElement('li');
+      li.textContent = m.id;
+      list.appendChild(li);
+    });
+
+    document.getElementById('usage-example').textContent =
+`curl ${BASE}/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${apiKey}" \\
+  -d '{"model":"${models.data?.[0]?.id || 'MODEL_NAME'}","messages":[{"role":"user","content":"hello"}]}'`;
+  } catch (e) {
+    token = null;
+    localStorage.removeItem('token');
+    document.getElementById('auth-section').classList.remove('hidden');
+    document.getElementById('dashboard').classList.add('hidden');
+  }
+}
+
+function copyKey() {
+  navigator.clipboard.writeText(apiKey);
+}
+
+async function refreshKey() {
+  if (!confirm('Regenerate API key? Old key will stop working.')) return;
+  const res = await api('/user/api-key/refresh', { method: 'POST' });
+  apiKey = res.api_key;
+  document.getElementById('api-key-display').textContent = apiKey;
+  loadDashboard();
+}
+
+function logout() {
+  token = null;
+  localStorage.removeItem('token');
+  location.reload();
+}
+</script>
+</body>
+</html>
