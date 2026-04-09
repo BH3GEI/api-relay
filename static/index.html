@@ -7,32 +7,50 @@
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; display: flex; justify-content: center; padding: 40px 20px; }
-.container { max-width: 600px; width: 100%; }
-h1 { font-size: 24px; margin-bottom: 24px; color: #fff; }
+.container { max-width: 680px; width: 100%; }
+h1 { font-size: 24px; margin-bottom: 8px; color: #fff; }
 h2 { font-size: 18px; margin: 24px 0 12px; color: #ccc; }
+h3 { font-size: 15px; margin: 16px 0 8px; color: #aaa; }
+p { font-size: 14px; line-height: 1.6; color: #999; margin-bottom: 8px; }
+.subtitle { color: #666; margin-bottom: 24px; font-size: 14px; }
 .card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
 input { width: 100%; padding: 10px 12px; border: 1px solid #333; border-radius: 6px; background: #111; color: #fff; font-size: 14px; margin-bottom: 12px; }
 button { padding: 10px 20px; border: none; border-radius: 6px; background: #2563eb; color: #fff; font-size: 14px; cursor: pointer; }
 button:hover { background: #1d4ed8; }
 .secondary { background: #333; }
 .secondary:hover { background: #444; }
-code { background: #111; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
-pre { background: #111; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; margin: 8px 0; }
+code { background: #111; padding: 2px 6px; border-radius: 4px; font-size: 13px; color: #e0e0e0; }
+pre { background: #111; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; margin: 8px 0; position: relative; }
 .hidden { display: none; }
 .key-display { display: flex; align-items: center; gap: 8px; }
 .key-display code { flex: 1; padding: 10px; font-size: 14px; }
 .model-list { list-style: none; }
-.model-list li { padding: 8px 12px; border-bottom: 1px solid #222; font-family: monospace; }
+.model-list li { padding: 8px 12px; border-bottom: 1px solid #222; font-family: monospace; font-size: 14px; }
 .msg { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }
 .msg.error { background: #3b1111; color: #f87171; }
 .msg.ok { background: #0f2b1a; color: #4ade80; }
 .tab { padding: 8px 16px; border-radius: 6px; background: #222; color: #aaa; cursor: pointer; border: none; font-size: 14px; }
 .tab.active { background: #2563eb; color: #fff; }
+.step { display: flex; gap: 12px; margin-bottom: 16px; }
+.step-num { background: #2563eb; color: #fff; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; flex-shrink: 0; margin-top: 2px; }
+.step-content { flex: 1; }
+.step-content p { margin-bottom: 4px; }
+.copy-btn { position: absolute; top: 6px; right: 6px; padding: 4px 10px; font-size: 11px; background: #333; border: none; border-radius: 4px; color: #aaa; cursor: pointer; }
+.copy-btn:hover { background: #444; color: #fff; }
+.pre-wrap { position: relative; }
+.info-box { background: #0f1b2d; border: 1px solid #1e3a5f; border-radius: 6px; padding: 12px 16px; margin: 8px 0; font-size: 13px; color: #7db8f0; }
+a { color: #2563eb; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.config-table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+.config-table td { padding: 6px 10px; border-bottom: 1px solid #222; }
+.config-table td:first-child { color: #888; white-space: nowrap; width: 120px; }
+.config-table td:last-child { font-family: monospace; word-break: break-all; }
 </style>
 </head>
 <body>
 <div class="container">
 <h1>API Relay</h1>
+<p class="subtitle">OpenAI 兼容的 API 中转服务</p>
 
 <!-- Auth section -->
 <div id="auth-section">
@@ -62,6 +80,56 @@ pre { background: #111; padding: 12px; border-radius: 6px; overflow-x: auto; fon
 
 <!-- Dashboard -->
 <div id="dashboard" class="hidden">
+
+  <!-- Quick Start -->
+  <div class="card">
+    <h2>Quick Start</h2>
+    <p>三步即可开始使用：</p>
+
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-content">
+        <p><strong style="color:#e0e0e0">复制你的配置信息</strong></p>
+        <table class="config-table">
+          <tr><td>API Base URL</td><td id="cfg-base"></td></tr>
+          <tr><td>API Key</td><td><span id="cfg-key"></span> <button class="copy-btn" style="position:static;margin-left:4px" onclick="copyKey()">Copy</button></td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-content">
+        <p><strong style="color:#e0e0e0">填入你的工具</strong></p>
+        <p>本服务兼容所有支持 OpenAI API 格式的工具。以下是常见工具的配置方式：</p>
+
+        <h3>Cursor / Windsurf</h3>
+        <p>Settings &rarr; Models &rarr; OpenAI API Key，填入上面的 API Key，Base URL 填入上面的地址。</p>
+
+        <h3>RooCode / Continue</h3>
+        <p>在插件设置中选择 "OpenAI Compatible"，填入 Base URL 和 API Key。</p>
+
+        <h3>ChatBox / NextChat 等客户端</h3>
+        <p>选择 OpenAI 作为 Provider，将 API 地址改为上面的 Base URL，填入 API Key。</p>
+
+        <h3>Python</h3>
+        <div class="pre-wrap"><pre id="python-example">loading...</pre><button class="copy-btn" onclick="copyCode('python-example')">Copy</button></div>
+
+        <h3>curl</h3>
+        <div class="pre-wrap"><pre id="curl-example">loading...</pre><button class="copy-btn" onclick="copyCode('curl-example')">Copy</button></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-content">
+        <p><strong style="color:#e0e0e0">选一个模型，开始使用</strong></p>
+        <p>在工具中将模型名设为下方列表中的任意一个即可。</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- API Key -->
   <div class="card">
     <h2>Your API Key</h2>
     <div class="key-display">
@@ -71,19 +139,40 @@ pre { background: #111; padding: 12px; border-radius: 6px; overflow-x: auto; fon
     <div style="margin-top:12px">
       <button class="secondary" onclick="refreshKey()">Regenerate Key</button>
     </div>
+    <div class="info-box" style="margin-top:12px">
+      Regenerate 会让旧 Key 立刻失效，所有使用旧 Key 的工具需要重新配置。
+    </div>
   </div>
 
+  <!-- Models -->
   <div class="card">
     <h2>Available Models</h2>
+    <p>以下模型可直接在 <code>model</code> 字段中使用：</p>
     <ul class="model-list" id="model-list"></ul>
   </div>
 
+  <!-- FAQ -->
   <div class="card">
-    <h2>Usage</h2>
-    <pre id="usage-example">loading...</pre>
+    <h2>FAQ</h2>
+
+    <h3>这是什么？</h3>
+    <p>这是一个 API 中转服务。你可以用统一的地址和 Key 访问多家 AI 模型，无需分别注册各家服务。</p>
+
+    <h3>支持 streaming 吗？</h3>
+    <p>支持。在请求中加入 <code>"stream": true</code> 即可获得流式响应。</p>
+
+    <h3>和直接调用官方 API 有什么区别？</h3>
+    <p>对你的代码来说没有区别——请求和响应格式完全一样，只是换了地址和 Key。</p>
+
+    <h3>API Key 安全吗？</h3>
+    <p>你的 Key 只用于本服务的身份验证，不会被发送到任何上游服务商。请妥善保管，不要分享给他人。</p>
+
+    <h3>遇到问题？</h3>
+    <p>请联系管理员。</p>
   </div>
 
-  <div style="margin-top:16px">
+  <div style="margin-top:16px;display:flex;gap:8px">
+    <a href="/admin"><button class="secondary">Admin Panel</button></a>
     <button class="secondary" onclick="logout()">Logout</button>
   </div>
 </div>
@@ -155,6 +244,8 @@ async function loadDashboard() {
     const keyRes = await api('/user/api-key');
     apiKey = keyRes.api_key;
     document.getElementById('api-key-display').textContent = apiKey;
+    document.getElementById('cfg-base').textContent = BASE;
+    document.getElementById('cfg-key').textContent = apiKey;
 
     const modelsRes = await fetch(BASE + '/models', { headers: { 'Authorization': 'Bearer ' + apiKey } });
     const models = await modelsRes.json();
@@ -166,11 +257,31 @@ async function loadDashboard() {
       list.appendChild(li);
     });
 
-    document.getElementById('usage-example').textContent =
+    const exModel = models.data?.[0]?.id || 'MODEL_NAME';
+
+    document.getElementById('python-example').textContent =
+`from openai import OpenAI
+
+client = OpenAI(
+    base_url="${BASE}/v1",
+    api_key="${apiKey}",
+)
+
+response = client.chat.completions.create(
+    model="${exModel}",
+    messages=[{"role": "user", "content": "hello"}],
+)
+print(response.choices[0].message.content)`;
+
+    document.getElementById('curl-example').textContent =
 `curl ${BASE}/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${apiKey}" \\
-  -d '{"model":"${models.data?.[0]?.id || 'MODEL_NAME'}","messages":[{"role":"user","content":"hello"}]}'`;
+  -d '{
+    "model": "${exModel}",
+    "messages": [{"role": "user", "content": "hello"}]
+  }'`;
+
   } catch (e) {
     token = null;
     localStorage.removeItem('token');
@@ -181,6 +292,10 @@ async function loadDashboard() {
 
 function copyKey() {
   navigator.clipboard.writeText(apiKey);
+}
+
+function copyCode(id) {
+  navigator.clipboard.writeText(document.getElementById(id).textContent);
 }
 
 async function refreshKey() {
