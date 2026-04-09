@@ -133,6 +133,12 @@ a:hover { text-decoration: underline; }
 
         <h3>curl</h3>
         <div class="pre-wrap"><pre id="curl-example">loading...</pre><button class="copy-btn" onclick="copyCode('curl-example')">Copy</button></div>
+
+        <h3>Image Generation (Imagen)</h3>
+        <div class="pre-wrap"><pre id="imagen-example">loading...</pre><button class="copy-btn" onclick="copyCode('imagen-example')">Copy</button></div>
+
+        <h3>Video Generation (Veo)</h3>
+        <div class="pre-wrap"><pre id="veo-example">loading...</pre><button class="copy-btn" onclick="copyCode('veo-example')">Copy</button></div>
       </div>
     </div>
 
@@ -178,7 +184,11 @@ a:hover { text-decoration: underline; }
     <p>支持。在请求中加入 <code>"stream": true</code> 即可获得流式响应。</p>
 
     <h3>支持哪些 API 格式？</h3>
-    <p>同时支持 OpenAI 格式（<code>/v1/chat/completions</code>）和 Anthropic 格式（<code>/v1/messages</code>）。用哪种都行，响应格式与各自官方 API 完全一致。</p>
+    <p>支持以下端点：</p>
+    <p>&bull; <code>/v1/chat/completions</code> — 文本对话（OpenAI 格式，支持 Kimi / Claude / Gemini）</p>
+    <p>&bull; <code>/v1/messages</code> — 文本对话（Anthropic 格式，支持 Claude）</p>
+    <p>&bull; <code>/v1/images/generations</code> — 图片生成（支持 Imagen 4.0）</p>
+    <p>&bull; <code>/v1/videos/generations</code> — 视频生成（支持 Veo 2.0 / 3.0）</p>
 
     <h3>和直接调用官方 API 有什么区别？</h3>
     <p>对你的代码来说没有区别——请求和响应格式完全一样，只是换了地址和 Key。</p>
@@ -321,6 +331,30 @@ print(message.content[0].text)`;
     "model": "${exModel}",
     "messages": [{"role": "user", "content": "hello"}]
   }'`;
+
+    document.getElementById('imagen-example').textContent =
+`curl ${BASE}/v1/images/generations \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${apiKey}" \\
+  -d '{
+    "model": "imagen-4.0-generate-001",
+    "prompt": "a cute cat sitting on a windowsill",
+    "n": 1
+  }'
+
+# Response contains base64-encoded image in data[0].b64_json`;
+
+    document.getElementById('veo-example').textContent =
+`curl ${BASE}/v1/videos/generations \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${apiKey}" \\
+  -d '{
+    "model": "veo-3.0-generate-001",
+    "instances": [{"prompt": "a cat walking on a beach"}],
+    "parameters": {"sampleCount": 1}
+  }'
+
+# Response returns an operation ID (async). Video generation takes time.`;
 
   } catch (e) {
     token = null;
