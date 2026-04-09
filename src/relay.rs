@@ -10,11 +10,23 @@ use std::sync::Arc;
 
 use crate::{AppState, db};
 
+// Extract API key from either "Authorization: Bearer xxx" or "x-api-key: xxx"
+fn extract_api_key(headers: &HeaderMap) -> Option<String> {
+    // Try Bearer token first
+    if let Some(key) = crate::auth::extract_bearer(headers) {
+        return Some(key);
+    }
+    // Then try x-api-key
+    headers.get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
 pub async fn list_models(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
-    let api_key = crate::auth::extract_bearer(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let api_key = extract_api_key(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     let models = db::list_models(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -37,44 +49,61 @@ const RETRY_STATUSES: &[u16] = &[401, 403, 429, 503];
 async fn try_upstream(
     url: &str,
     user_agent: &str,
-    auth: &str,
+    key: &str,
     body: &str,
+    use_anthropic_auth: bool,
 ) -> Result<reqwest::Response, StatusCode> {
-    reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(120))
         .build()
-        .unwrap()
+        .unwrap();
+
+    let mut req = client
         .post(url)
         .header("Content-Type", "application/json")
-        .header("Authorization", auth)
         .header("User-Agent", user_agent)
-        .body(body.to_string())
-        .send()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)
+        .body(body.to_string());
+
+    if use_anthropic_auth {
+        req = req
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01");
+    } else {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+
+    req.send().await.map_err(|_| StatusCode::BAD_GATEWAY)
 }
 
-pub async fn chat_completions(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: String,
+async fn relay_with_fallback(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &str,
+    use_anthropic_auth: bool,
 ) -> Result<Response, StatusCode> {
     // Auth
-    let api_key = crate::auth::extract_bearer(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let api_key = extract_api_key(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     // Parse body
-    let mut body_json: Value = serde_json::from_str(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mut body_json: Value = serde_json::from_str(body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let model_name = body_json["model"].as_str().ok_or(StatusCode::BAD_REQUEST)?.to_string();
 
     // Resolve model
     let resolved = db::resolve_model(&state.db, &model_name).await.map_err(|_| StatusCode::NOT_FOUND)?;
     body_json["model"] = Value::String(resolved.upstream_model.clone());
-    let url = format!("{}{}", resolved.base_url.trim_end_matches('/'), resolved.upstream_path);
+
+    // For Anthropic format, use upstream's messages path; for OpenAI, use configured path
+    let upstream_path = if use_anthropic_auth {
+        "/v1/messages"
+    } else {
+        &resolved.upstream_path
+    };
+    let url = format!("{}{}", resolved.base_url.trim_end_matches('/'), upstream_path);
     let body_str = body_json.to_string();
 
-    // Gather keys: server-side provider_keys first, then client's x-upstream-key as fallback
+    // Gather keys
     let mut keys: Vec<String> = Vec::new();
     if let Ok(provider_keys) = db::get_provider_keys(&state.db, resolved.provider_id).await {
         for pk in &provider_keys {
@@ -92,20 +121,32 @@ pub async fn chat_completions(
     // Try each key with fallback
     let mut last_resp = None;
     for key in &keys {
-        let auth = format!("Bearer {key}");
-        let resp = try_upstream(&url, &resolved.user_agent, &auth, &body_str).await?;
+        let resp = try_upstream(&url, &resolved.user_agent, key, &body_str, use_anthropic_auth).await?;
         let status_code = resp.status().as_u16();
 
         if !RETRY_STATUSES.contains(&status_code) {
-            // Success or non-retryable error — return this response
             return stream_response(resp);
         }
-        // Retryable error — try next key
         last_resp = Some(resp);
     }
 
-    // All keys exhausted, return last response
     stream_response(last_resp.unwrap())
+}
+
+pub async fn chat_completions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, StatusCode> {
+    relay_with_fallback(&state, &headers, &body, false).await
+}
+
+pub async fn anthropic_messages(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, StatusCode> {
+    relay_with_fallback(&state, &headers, &body, true).await
 }
 
 fn stream_response(resp: reqwest::Response) -> Result<Response, StatusCode> {

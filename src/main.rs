@@ -41,6 +41,7 @@ async fn main() {
         .route("/models", get(relay::list_models))
         .route("/v1/models", get(relay::list_models))
         .route("/v1/chat/completions", post(relay::chat_completions))
+        .route("/v1/messages", post(relay::anthropic_messages))
         .route("/admin/users", get(admin_list_users).post(admin_create_user))
         .route("/admin/users/:id", delete(admin_delete_user))
         .route("/admin/providers", get(admin_list_providers).post(admin_create_provider))

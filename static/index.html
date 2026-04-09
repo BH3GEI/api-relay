@@ -101,19 +101,35 @@ a:hover { text-decoration: underline; }
       <div class="step-num">2</div>
       <div class="step-content">
         <p><strong style="color:#e0e0e0">填入你的工具</strong></p>
-        <p>本服务兼容所有支持 OpenAI API 格式的工具。以下是常见工具的配置方式：</p>
+        <p>本服务同时兼容 <strong style="color:#e0e0e0">OpenAI</strong> 和 <strong style="color:#e0e0e0">Anthropic</strong> API 格式。</p>
+
+        <div class="info-box" style="margin-bottom:12px">
+          <strong>Base URL 怎么填？</strong><br>
+          不同工具对 Base URL 的要求不同，以下三种写法都可以，按工具要求选：<br>
+          &bull; <code>https://api.mofa.ai</code> — 大多数工具（Cursor、ChatBox 等）<br>
+          &bull; <code>https://api.mofa.ai/v1</code> — OpenAI SDK、部分工具要求带 /v1<br>
+          &bull; <code>https://api.mofa.ai/v1/chat/completions</code> — 少数需要完整端点的工具<br>
+          如果不确定，先试第一种。
+        </div>
 
         <h3>Cursor / Windsurf</h3>
-        <p>Settings &rarr; Models &rarr; OpenAI API Key，填入上面的 API Key，Base URL 填入上面的地址。</p>
+        <p>Settings &rarr; Models &rarr; OpenAI API Key，填入 API Key，Base URL 填 <code>https://api.mofa.ai/v1</code>。</p>
+
+        <h3>Claude Code</h3>
+        <p>设置环境变量即可：</p>
+        <div class="pre-wrap"><pre id="claude-code-example">loading...</pre><button class="copy-btn" onclick="copyCode('claude-code-example')">Copy</button></div>
 
         <h3>RooCode / Continue</h3>
         <p>在插件设置中选择 "OpenAI Compatible"，填入 Base URL 和 API Key。</p>
 
         <h3>ChatBox / NextChat 等客户端</h3>
-        <p>选择 OpenAI 作为 Provider，将 API 地址改为上面的 Base URL，填入 API Key。</p>
+        <p>选择 OpenAI 作为 Provider，将 API 地址改为 Base URL，填入 API Key。</p>
 
-        <h3>Python</h3>
+        <h3>Python (OpenAI SDK)</h3>
         <div class="pre-wrap"><pre id="python-example">loading...</pre><button class="copy-btn" onclick="copyCode('python-example')">Copy</button></div>
+
+        <h3>Python (Anthropic SDK)</h3>
+        <div class="pre-wrap"><pre id="python-anthropic-example">loading...</pre><button class="copy-btn" onclick="copyCode('python-anthropic-example')">Copy</button></div>
 
         <h3>curl</h3>
         <div class="pre-wrap"><pre id="curl-example">loading...</pre><button class="copy-btn" onclick="copyCode('curl-example')">Copy</button></div>
@@ -160,6 +176,9 @@ a:hover { text-decoration: underline; }
 
     <h3>支持 streaming 吗？</h3>
     <p>支持。在请求中加入 <code>"stream": true</code> 即可获得流式响应。</p>
+
+    <h3>支持哪些 API 格式？</h3>
+    <p>同时支持 OpenAI 格式（<code>/v1/chat/completions</code>）和 Anthropic 格式（<code>/v1/messages</code>）。用哪种都行，响应格式与各自官方 API 完全一致。</p>
 
     <h3>和直接调用官方 API 有什么区别？</h3>
     <p>对你的代码来说没有区别——请求和响应格式完全一样，只是换了地址和 Key。</p>
@@ -258,6 +277,12 @@ async function loadDashboard() {
     });
 
     const exModel = models.data?.[0]?.id || 'MODEL_NAME';
+    const claudeModel = (models.data || []).find(m => m.id.includes('claude'))?.id || exModel;
+
+    document.getElementById('claude-code-example').textContent =
+`export ANTHROPIC_BASE_URL=${BASE}
+export ANTHROPIC_API_KEY=${apiKey}
+claude`;
 
     document.getElementById('python-example').textContent =
 `from openai import OpenAI
@@ -272,6 +297,21 @@ response = client.chat.completions.create(
     messages=[{"role": "user", "content": "hello"}],
 )
 print(response.choices[0].message.content)`;
+
+    document.getElementById('python-anthropic-example').textContent =
+`import anthropic
+
+client = anthropic.Anthropic(
+    base_url="${BASE}",
+    api_key="${apiKey}",
+)
+
+message = client.messages.create(
+    model="${claudeModel}",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "hello"}],
+)
+print(message.content[0].text)`;
 
     document.getElementById('curl-example').textContent =
 `curl ${BASE}/v1/chat/completions \\
