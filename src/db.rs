@@ -294,7 +294,7 @@ pub async fn check_limit(pool: &SqlitePool, user_id: i64, model: &str) -> Result
             return Ok(false);
         }
     }
-    Ok(true) // Within limits
+    if limits.is_empty() { Ok(false) } else { Ok(true) }
 }
 
 #[derive(Serialize, sqlx::FromRow)]
