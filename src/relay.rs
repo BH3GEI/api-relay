@@ -97,9 +97,10 @@ async fn relay_with_fallback(
 
     let is_stream = body_json.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    // For Anthropic format, use upstream's messages path; for OpenAI, use configured path
+    let anthropic_path;
     let upstream_path = if use_anthropic_auth {
-        "/v1/messages"
+        anthropic_path = resolved.upstream_path.replace("/chat/completions", "/messages");
+        &anthropic_path
     } else {
         &resolved.upstream_path
     };
