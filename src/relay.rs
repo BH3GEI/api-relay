@@ -1,6 +1,6 @@
 use axum::{
-    body::Body,
-    extract::{Json, State},
+    body::{Body, Bytes},
+    extract::{Json, Path, State},
     http::{HeaderMap, StatusCode, header},
     response::Response,
 };
@@ -288,4 +288,94 @@ fn stream_response(resp: reqwest::Response) -> Result<Response, StatusCode> {
     }
 
     builder.body(Body::from_stream(stream)).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Proxy /v1/files/* requests to Kimi's file API.
+/// Forwards the raw body (multipart or JSON) as-is.
+async fn file_proxy(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &str,
+    method: &str,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    let api_key = extract_api_key(headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    let provider_keys = db::get_provider_keys(&state.db, 1).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if provider_keys.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let base_url = {
+        let providers = db::list_providers(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        providers.into_iter().find(|p| p.id == 1).map(|p| p.base_url).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+
+    let url = format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'));
+
+    let content_type = headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream");
+
+    let mut last_resp = None;
+    for pk in &provider_keys {
+        let req = match method {
+            "DELETE" => state.http_client.delete(&url),
+            _ => state.http_client.post(&url),
+        };
+        let resp = req
+            .header("Content-Type", content_type)
+            .header("Authorization", format!("Bearer {}", pk.api_key))
+            .body(body.clone())
+            .send()
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+        let status_code = resp.status().as_u16();
+        if !RETRY_STATUSES.contains(&status_code) {
+            return stream_response(resp);
+        }
+        last_resp = Some(resp);
+    }
+
+    stream_response(last_resp.unwrap())
+}
+
+pub async fn files_upload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    file_proxy(&state, &headers, "/v1/files", "POST", body).await
+}
+
+pub async fn files_list(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    file_proxy(&state, &headers, "/v1/files", "GET", Bytes::new()).await
+}
+
+pub async fn files_action(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(file_id): Path<String>,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    file_proxy(&state, &headers, &format!("/v1/files/{file_id}"), "GET", body).await
+}
+
+pub async fn files_content(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(file_id): Path<String>,
+) -> Result<Response, StatusCode> {
+    file_proxy(&state, &headers, &format!("/v1/files/{file_id}/content"), "GET", Bytes::new()).await
+}
+
+pub async fn files_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(file_id): Path<String>,
+) -> Result<Response, StatusCode> {
+    file_proxy(&state, &headers, &format!("/v1/files/{file_id}"), "DELETE", Bytes::new()).await
 }

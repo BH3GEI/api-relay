@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    extract::{Json, Path, State},
+    extract::{DefaultBodyLimit, Json, Path, State},
     http::{HeaderMap, StatusCode},
     response::Html,
     routing::{delete, get, post, put},
@@ -52,6 +52,9 @@ async fn main() {
         .route("/v1/messages", post(relay::anthropic_messages))
         .route("/v1/images/generations", post(relay::image_generations))
         .route("/v1/videos/generations", post(relay::video_generations))
+        .route("/v1/files", post(relay::files_upload).get(relay::files_list))
+        .route("/v1/files/:file_id", get(relay::files_action).delete(relay::files_delete))
+        .route("/v1/files/:file_id/content", get(relay::files_content))
         .route("/user/usage", get(user_usage))
         .route("/admin/usage", get(admin_usage))
         .route("/admin/limits", get(admin_list_limits).post(admin_create_limit))
@@ -64,6 +67,7 @@ async fn main() {
         .route("/admin/keys/delete/:id", delete(admin_delete_provider_key))
         .route("/admin/models", get(admin_list_models).post(admin_create_model))
         .route("/admin/models/:id", put(admin_update_model).delete(admin_delete_model))
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
