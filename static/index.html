@@ -139,6 +139,9 @@ a:hover { text-decoration: underline; }
 
         <h3>Video Generation (Veo)</h3>
         <div class="pre-wrap"><pre id="veo-example">loading...</pre><button class="copy-btn" onclick="copyCode('veo-example')">Copy</button></div>
+
+        <h3>File Upload (Kimi)</h3>
+        <div class="pre-wrap"><pre id="file-upload-example">loading...</pre><button class="copy-btn" onclick="copyCode('file-upload-example')">Copy</button></div>
       </div>
     </div>
 
@@ -195,8 +198,12 @@ a:hover { text-decoration: underline; }
     <p>支持以下端点：</p>
     <p>&bull; <code>/v1/chat/completions</code> — 文本对话（OpenAI 格式，支持 Kimi / Claude / Gemini）</p>
     <p>&bull; <code>/v1/messages</code> — 文本对话（Anthropic 格式，支持 Claude）</p>
+    <p>&bull; <code>/v1/files</code> — 文件上传（用于图片/视频理解，支持 Kimi）</p>
     <p>&bull; <code>/v1/images/generations</code> — 图片生成（支持 Imagen 4.0）</p>
     <p>&bull; <code>/v1/videos/generations</code> — 视频生成（支持 Veo 2.0 / 3.0）</p>
+
+    <h3>支持图片上传吗？</h3>
+    <p>支持两种方式：1) 将图片 base64 编码后直接放在消息中（<code>data:image/png;base64,...</code>）；2) 先通过 <code>/v1/files</code> 上传文件，再用返回的 file ID（<code>ms://FILE_ID</code>）引用。单次请求最大 100MB。</p>
 
     <h3>和直接调用官方 API 有什么区别？</h3>
     <p>对你的代码来说没有区别——请求和响应格式完全一样，只是换了地址和 Key。</p>
@@ -377,6 +384,28 @@ print(message.content[0].text)`;
   }'
 
 # Response returns an operation ID (async). Video generation takes time.`;
+
+    document.getElementById('file-upload-example').textContent =
+`# Upload an image for vision understanding
+curl ${BASE}/v1/files \\
+  -H "Authorization: Bearer ${apiKey}" \\
+  -F "file=@image.png" \\
+  -F "purpose=image"
+
+# Use the returned file ID in chat
+curl ${BASE}/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${apiKey}" \\
+  -d '{
+    "model": "kimi-coding",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "describe this image"},
+        {"type": "image_url", "image_url": {"url": "ms://FILE_ID"}}
+      ]
+    }]
+  }'`;
 
   } catch (e) {
     token = null;
