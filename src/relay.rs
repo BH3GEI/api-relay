@@ -307,12 +307,7 @@ async fn file_proxy(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let base_url = {
-        let providers = db::list_providers(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        providers.into_iter().find(|p| p.id == 1).map(|p| p.base_url).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-
-    let url = format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'));
+    let url = format!("https://api.moonshot.cn/{}", path.trim_start_matches('/'));
 
     let content_type = headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream");
 
