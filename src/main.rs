@@ -32,7 +32,7 @@ async fn main() {
 
     let http_client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(86400))
         .pool_max_idle_per_host(20)
         .build()
         .unwrap();
