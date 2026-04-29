@@ -58,6 +58,7 @@ async fn try_upstream(
         .post(url)
         .header("Content-Type", "application/json")
         .header("User-Agent", user_agent)
+        .header("x-app", "cli")
         .body(body.to_string());
 
     if use_anthropic_auth {
