@@ -190,9 +190,20 @@ async fn admin_refresh_catalog(State(state): State<Arc<AppState>>, headers: Head
 
 // ── Provider Keys ──
 
-async fn admin_list_provider_keys(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(provider_id): Path<i64>) -> Result<Json<Vec<db::ProviderKey>>, StatusCode> {
+#[derive(serde::Serialize)]
+struct KeyWithStatus {
+    #[serde(flatten)]
+    key: db::ProviderKey,
+    status: pool::KeyStatus,
+}
+
+async fn admin_list_provider_keys(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(provider_id): Path<i64>) -> Result<Json<Vec<KeyWithStatus>>, StatusCode> {
     auth::require_admin(&state, &headers).await?;
-    db::list_provider_keys(&state.db, provider_id).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let keys = db::list_provider_keys(&state.db, provider_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(keys.into_iter().map(|key| {
+        let status = state.keys.status(&key.api_key);
+        KeyWithStatus { key, status }
+    }).collect()))
 }
 
 #[derive(Deserialize)]

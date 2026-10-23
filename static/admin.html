@@ -81,17 +81,18 @@ th { color: #888; font-weight: 600; }
       <input id="p-models" placeholder="Extra models, comma-separated (optional)" style="width:240px">
       <button onclick="createProvider()">Add</button>
     </div>
-    <table><thead><tr><th>ID</th><th>Name</th><th>Base URL</th><th>Anthropic Base URL</th><th>Extra Models</th><th>User-Agent</th><th>Enabled</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>
+    <table><thead><tr><th>ID</th><th>Name</th><th>Keys</th><th>Base URL</th><th>Anthropic Base URL</th><th>Extra Models</th><th>User-Agent</th><th>Enabled</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>
 
     <div id="keys-section" class="hidden" style="margin-top:16px;padding-top:16px;border-top:1px solid #333">
       <h2 id="keys-title">Keys</h2>
+      <p style="color:#888;font-size:13px">Status is what the relay has seen since it last started. Refreshes every 10s.</p>
       <div style="margin-bottom:12px">
         <input id="k-key" placeholder="API Key" style="width:280px">
         <input id="k-label" placeholder="Label (optional)" style="width:120px">
         <input id="k-priority" placeholder="Priority" value="0" style="width:60px" type="number">
         <button onclick="createKey()">Add Key</button>
       </div>
-      <table><thead><tr><th>ID</th><th>Label</th><th>API Key</th><th>Priority</th><th></th></tr></thead><tbody id="keys-body"></tbody></table>
+      <table><thead><tr><th>ID</th><th>Label</th><th>API Key</th><th>Priority</th><th>Status</th><th>Last Used</th><th>OK / Failed</th><th></th></tr></thead><tbody id="keys-body"></tbody></table>
     </div>
   </div>
 
@@ -214,14 +215,24 @@ async function deleteUser(id) {
 }
 
 // Providers
+// "8 keys · 7 OK · 1 cooling" for the providers table
+function keySummary(keys) {
+  const cooling = keys.filter(k => k.status.cooling_secs > 0).length;
+  const parts = [`${keys.length} key${keys.length === 1 ? '' : 's'}`];
+  if (keys.length) parts.push(`<span style="color:#4ade80">${keys.length - cooling} OK</span>`);
+  if (cooling) parts.push(`<span style="color:#f87171">${cooling} cooling</span>`);
+  return parts.join(' · ');
+}
+
 async function loadProviders() {
   providers = await api('/admin/providers');
+  const keyLists = await Promise.all(providers.map(p => api(`/admin/keys/${p.id}`).catch(() => [])));
   const tb = document.getElementById('providers-body');
-  tb.innerHTML = providers.map(p => `<tr>
-    <td>${p.id}</td><td>${p.name}</td><td>${p.base_url}</td><td>${p.anthropic_base_url || '-'}</td><td>${p.models || '-'}</td><td>${p.user_agent}</td>
+  tb.innerHTML = providers.map((p, i) => `<tr>
+    <td>${p.id}</td><td>${p.name}</td><td style="white-space:nowrap">${keySummary(keyLists[i])}</td><td>${p.base_url}</td><td>${p.anthropic_base_url || '-'}</td><td>${p.models || '-'}</td><td>${p.user_agent}</td>
     <td>${p.enabled ? 'Yes' : 'No'}</td>
     <td>
-      <button class="btn-sm secondary" onclick="showKeys(${p.id},'${p.name}')">Keys</button>
+      <button class="btn-sm secondary" onclick="showKeys(${p.id},'${p.name}')">Manage Keys</button>
       <button class="btn-danger btn-sm" onclick="deleteProvider(${p.id})">Delete</button>
     </td>
   </tr>`).join('');
@@ -294,16 +305,52 @@ async function deleteLimit(id) {
 
 // Keys
 let currentProviderId = null;
+let keysTimer = null;
 async function showKeys(pid, pname) {
   currentProviderId = pid;
   document.getElementById('keys-title').textContent = `Keys for "${pname}"`;
   document.getElementById('keys-section').classList.remove('hidden');
-  const keys = await api(`/admin/keys/${pid}`);
-  const tb = document.getElementById('keys-body');
-  tb.innerHTML = keys.map(k => `<tr>
-    <td>${k.id}</td><td>${k.label || '-'}</td>
+  await renderKeys();
+  document.getElementById('keys-section').scrollIntoView({ behavior: 'smooth' });
+  // Status changes as requests come in; keep it fresh while the list is open
+  clearInterval(keysTimer);
+  keysTimer = setInterval(() => { if (!document.hidden) renderKeys().catch(() => {}); }, 10000);
+}
+
+const FAIL_REASONS = { '401': 'invalid key', '403': 'forbidden', '402': 'no balance', '429': 'rate limited',
+  '502': 'upstream error', '503': 'upstream error', '504': 'upstream timeout', 'network error': 'network error' };
+
+function ago(unix) {
+  if (!unix) return '-';
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - unix));
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
+function keyStatus(st) {
+  const reason = FAIL_REASONS[st.last_result] || st.last_result;
+  if (st.cooling_secs > 0) {
+    const left = st.cooling_secs >= 60 ? Math.ceil(st.cooling_secs / 60) + 'm' : st.cooling_secs + 's';
+    return `<span style="color:#f87171">Cooling ${left}</span> <span style="color:#888">(${reason})</span>`;
+  }
+  if (!st.last_result) return '<span style="color:#888">Unused</span>';
+  if (FAIL_REASONS[st.last_result]) return `<span style="color:#fbbf24">Ready</span> <span style="color:#888">(last: ${reason})</span>`;
+  return '<span style="color:#4ade80">OK</span>';
+}
+
+async function renderKeys() {
+  const keys = await api(`/admin/keys/${currentProviderId}`);
+  // Requests go to the first key (by priority) that isn't cooling down
+  const inUse = keys.find(k => k.enabled && k.status.cooling_secs === 0);
+  document.getElementById('keys-body').innerHTML = keys.map(k => `<tr>
+    <td>${k.id}</td><td>${k.label || '-'}${k === inUse ? ' <span style="color:#2563eb">● in use</span>' : ''}</td>
     <td><code style="font-size:11px">***${k.api_key.slice(-8)}</code></td>
     <td>${k.priority}</td>
+    <td>${keyStatus(k.status)}</td>
+    <td>${ago(k.status.last_used)}</td>
+    <td>${k.status.ok} / ${k.status.failed}</td>
     <td><button class="btn-danger btn-sm" onclick="deleteKey(${k.id})">Delete</button></td>
   </tr>`).join('');
 }
@@ -313,12 +360,15 @@ async function createKey() {
     label: document.getElementById('k-label').value || null,
     priority: parseInt(document.getElementById('k-priority').value) || 0
   })});
-  showKeys(currentProviderId, document.getElementById('keys-title').textContent.replace('Keys for "','').replace('"',''));
+  document.getElementById('k-key').value = '';
+  await renderKeys();
+  loadProviders();
 }
 async function deleteKey(id) {
   if (!confirm('Delete key?')) return;
   await api('/admin/keys/delete/'+id, { method:'DELETE' });
-  showKeys(currentProviderId, document.getElementById('keys-title').textContent.replace('Keys for "','').replace('"',''));
+  await renderKeys();
+  loadProviders();
 }
 
 function logout() {
