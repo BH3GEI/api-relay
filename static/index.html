@@ -95,6 +95,7 @@ a:hover { text-decoration: underline; }
         <p><strong style="color:#e0e0e0">复制你的配置信息</strong></p>
         <table class="config-table">
           <tr><td>API Base URL</td><td id="cfg-base"></td></tr>
+          <tr id="cfg-lan-row" class="hidden"><td>LazyCat 内网地址</td><td id="cfg-lan" style="color:#888"></td></tr>
           <tr><td>API Key</td><td><span id="cfg-key"></span> <button class="copy-btn" style="position:static;margin-left:4px" onclick="copyKey()">Copy</button></td></tr>
         </table>
       </div>
@@ -228,7 +229,9 @@ a:hover { text-decoration: underline; }
 </div>
 
 <script>
+// Requests go to this page's own origin; what users configure is SHOW, the public address when set
 const BASE = location.origin;
+let SHOW = BASE;
 function esc(v) {
   return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -310,7 +313,14 @@ async function loadDashboard() {
     const keyRes = await api('/user/api-key');
     apiKey = keyRes.api_key;
     document.getElementById('api-key-display').textContent = apiKey;
-    document.getElementById('cfg-base').textContent = BASE;
+    try {
+      const cfg = await api('/user/config');
+      if (cfg.public_url) SHOW = cfg.public_url;
+    } catch (e) {}
+    document.querySelectorAll('.base-url').forEach(el => el.textContent = SHOW);
+    document.getElementById('cfg-base').textContent = SHOW;
+    document.getElementById('cfg-lan-row').classList.toggle('hidden', SHOW === BASE);
+    document.getElementById('cfg-lan').textContent = BASE;
     document.getElementById('cfg-key').textContent = apiKey;
 
     // Load usage
@@ -338,18 +348,21 @@ async function loadDashboard() {
     });
 
     const exModel = models.data?.[0]?.id || 'MODEL_NAME';
-    const claudeModel = (models.data || []).find(m => m.id.includes('claude'))?.id || exModel;
+    // A sensible default for coding agents: Kimi's k3 when it's there
+    const claudeModel = (models.data || []).find(m => m.id.endsWith('/k3'))?.id || exModel;
 
     document.getElementById('claude-code-example').textContent =
-`export ANTHROPIC_BASE_URL=${BASE}
-export ANTHROPIC_API_KEY=${apiKey}
+`export ANTHROPIC_BASE_URL=${SHOW}
+export ANTHROPIC_AUTH_TOKEN=${apiKey}
+export ANTHROPIC_MODEL=${claudeModel}
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=${claudeModel}
 claude`;
 
     document.getElementById('python-example').textContent =
 `from openai import OpenAI
 
 client = OpenAI(
-    base_url="${BASE}/v1",
+    base_url="${SHOW}/v1",
     api_key="${apiKey}",
 )
 
@@ -363,7 +376,7 @@ print(response.choices[0].message.content)`;
 `import anthropic
 
 client = anthropic.Anthropic(
-    base_url="${BASE}",
+    base_url="${SHOW}",
     api_key="${apiKey}",
 )
 
@@ -375,7 +388,7 @@ message = client.messages.create(
 print(message.content[0].text)`;
 
     document.getElementById('curl-example').textContent =
-`curl ${BASE}/v1/chat/completions \\
+`curl ${SHOW}/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${apiKey}" \\
   -d '{
@@ -384,7 +397,7 @@ print(message.content[0].text)`;
   }'`;
 
     document.getElementById('imagen-example').textContent =
-`curl ${BASE}/v1/images/generations \\
+`curl ${SHOW}/v1/images/generations \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${apiKey}" \\
   -d '{
@@ -396,7 +409,7 @@ print(message.content[0].text)`;
 # Response contains base64-encoded image in data[0].b64_json`;
 
     document.getElementById('veo-example').textContent =
-`curl ${BASE}/v1/videos/generations \\
+`curl ${SHOW}/v1/videos/generations \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${apiKey}" \\
   -d '{
@@ -409,13 +422,13 @@ print(message.content[0].text)`;
 
     document.getElementById('file-upload-example').textContent =
 `# Upload an image for vision understanding
-curl ${BASE}/v1/files \\
+curl ${SHOW}/v1/files \\
   -H "Authorization: Bearer ${apiKey}" \\
   -F "file=@image.png" \\
   -F "purpose=image"
 
 # Use the returned file ID in chat
-curl ${BASE}/v1/chat/completions \\
+curl ${SHOW}/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${apiKey}" \\
   -d '{

@@ -29,7 +29,8 @@ pub async fn require_api_key(
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let ip = crate::guard::client_ip(req.headers());
+    let public = req.extensions().get::<crate::guard::PublicRequest>().is_some();
+    let ip = crate::guard::client_ip(req.headers(), public);
     if ip.as_deref().is_some_and(|ip| state.guard.blocked(ip)) {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }

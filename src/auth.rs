@@ -156,7 +156,7 @@ pub async fn login(
     if state.lazycat {
         return Err(StatusCode::FORBIDDEN);
     }
-    let ip = crate::guard::client_ip(&headers);
+    let ip = crate::guard::client_ip(&headers, false);
     if ip.as_deref().is_some_and(|ip| state.guard.blocked(ip)) {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }

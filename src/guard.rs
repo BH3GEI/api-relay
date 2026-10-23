@@ -32,11 +32,19 @@ impl AuthGuard {
     }
 }
 
+/// Marks requests that came in on the public listener (the Cloudflare Tunnel).
+#[derive(Clone, Copy)]
+pub struct PublicRequest;
+
 /// The caller's address as reported by the reverse proxy in front of the relay.
 /// None when there is no proxy header: throttling everyone behind one address would let
 /// an attacker lock out legitimate users.
-pub fn client_ip(headers: &HeaderMap) -> Option<String> {
+pub fn client_ip(headers: &HeaderMap, public: bool) -> Option<String> {
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    if public {
+        // Cloudflare sets this itself; through the tunnel nobody else can reach us
+        return header("cf-connecting-ip").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    }
     // The last hop is the one our proxy appended; earlier entries come from the client and can be forged
     header("x-forwarded-for")
         .and_then(|v| v.rsplit(',').next())

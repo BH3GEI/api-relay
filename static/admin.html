@@ -58,6 +58,7 @@ td.actions { white-space: nowrap; text-align: right; }
     <button class="tab" onclick="showTab('models')">Models</button>
     <button class="tab" onclick="showTab('usage')">Usage</button>
     <button class="tab" onclick="showTab('limits')">Limits</button>
+    <button class="tab" onclick="showTab('tunnel')">Public Access</button>
   </div>
 
   <!-- Users -->
@@ -111,6 +112,30 @@ td.actions { white-space: nowrap; text-align: right; }
   <div id="tab-usage" class="card hidden">
     <h2>Today's Usage</h2>
     <table><thead><tr><th>User</th><th>Model</th><th>Requests</th><th>Tokens</th></tr></thead><tbody id="usage-body"></tbody></table>
+  </div>
+
+  <!-- Public access -->
+  <div id="tab-tunnel" class="card hidden">
+    <h2>Public Access (Cloudflare Tunnel)</h2>
+    <p style="color:#888;font-size:13px;line-height:1.6">
+      Makes the API (<code>/v1/…</code> only) reachable from the internet without the LazyCat client.
+      The pages and admin stay behind LazyCat sign-in.<br>
+      In Cloudflare: Zero Trust → Networks → Tunnels → Create a tunnel (cloudflared) → copy its token.
+      Then add a public hostname (e.g. <code>relay.example.com</code>) with service <code>http://localhost:3001</code>.
+    </p>
+    <div id="tunnel-unavailable" class="msg error hidden">This build has no cloudflared or no public listener.</div>
+    <div style="margin:12px 0">
+      <input id="tunnel-token" type="password" placeholder="Tunnel token" style="width:420px" autocomplete="off">
+      <button onclick="saveTunnel()">Save &amp; connect</button>
+      <button class="btn-danger" onclick="disableTunnel()">Turn off</button>
+    </div>
+    <p>Status: <strong id="tunnel-state">-</strong></p>
+    <div style="margin:12px 0">
+      <input id="public-url" placeholder="Public URL shown to users, e.g. https://relay.example.com" style="width:420px">
+      <button onclick="savePublicUrl()">Save URL</button>
+      <span id="public-url-msg" style="font-size:13px;color:#888"></span>
+    </div>
+    <pre id="tunnel-log" style="background:#111;border:1px solid #333;border-radius:6px;padding:10px;font-size:11px;max-height:300px;overflow:auto;white-space:pre-wrap;color:#aaa"></pre>
   </div>
 
   <!-- Limits -->
@@ -195,7 +220,8 @@ async function loadAdmin() {
 function showTab(name) {
   if (name === 'usage') loadUsage();
   if (name === 'limits') loadLimits();
-  ['users','providers','models','usage','limits'].forEach(t => {
+  if (name === 'tunnel') loadTunnel();
+  ['users','providers','models','usage','limits','tunnel'].forEach(t => {
     document.getElementById('tab-'+t).classList.toggle('hidden', t !== name);
   });
   document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
@@ -415,6 +441,47 @@ async function deleteKey(id) {
   await api('/admin/keys/delete/'+id, { method:'DELETE' });
   await renderKeys();
   loadProviders();
+}
+
+// Public access
+const TUNNEL_STATES = { off: ['Off', '#888'], starting: ['Connecting…', '#fbbf24'], connected: ['Connected', '#4ade80'], stopped: ['Stopped (retrying)', '#f87171'] };
+let tunnelTimer = null;
+async function loadTunnel() {
+  const st = await api('/admin/tunnel');
+  const urlInput = document.getElementById('public-url');
+  if (!urlInput.dataset.loaded) {
+    urlInput.dataset.loaded = '1';
+    urlInput.value = (await api('/user/config')).public_url || '';
+  }
+  document.getElementById('tunnel-unavailable').classList.toggle('hidden', st.available);
+  const [label, color] = TUNNEL_STATES[st.state] || [st.state, '#888'];
+  const el = document.getElementById('tunnel-state');
+  el.textContent = st.configured || st.state !== 'off' ? label : 'Not configured';
+  el.style.color = color;
+  document.getElementById('tunnel-log').textContent = st.log.join('\n');
+  clearTimeout(tunnelTimer);
+  if (!document.getElementById('tab-tunnel').classList.contains('hidden')) tunnelTimer = setTimeout(loadTunnel, 3000);
+}
+async function savePublicUrl() {
+  const msg = document.getElementById('public-url-msg');
+  try {
+    await api('/admin/public-url', { method: 'PUT', body: JSON.stringify({ url: document.getElementById('public-url').value }) });
+    msg.textContent = 'Saved. The home page now shows this address.'; msg.style.color = '#4ade80';
+  } catch (e) {
+    msg.textContent = 'Must be a bare https:// address with no path.'; msg.style.color = '#f87171';
+  }
+}
+async function saveTunnel() {
+  const token = document.getElementById('tunnel-token').value.trim();
+  if (!token) return;
+  await api('/admin/tunnel', { method: 'PUT', body: JSON.stringify({ token }) });
+  document.getElementById('tunnel-token').value = '';
+  loadTunnel();
+}
+async function disableTunnel() {
+  if (!confirm('Turn off public access?')) return;
+  await api('/admin/tunnel', { method: 'PUT', body: JSON.stringify({ token: '' }) });
+  loadTunnel();
 }
 
 function logout() {

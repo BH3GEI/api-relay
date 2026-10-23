@@ -18,6 +18,7 @@ mod guard;
 mod pool;
 mod quota;
 mod relay;
+mod tunnel;
 mod usage;
 
 pub struct AppState {
@@ -32,12 +33,15 @@ pub struct AppState {
     pub admission: tokio::sync::Mutex<()>,
     /// Running as a LazyCat app: trust the identity headers its gateway sets
     pub lazycat: bool,
+    pub tunnel: tunnel::Tunnel,
 }
 
 #[tokio::main]
 async fn main() {
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:relay.db?mode=rwc".into());
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".into());
+    // Optional second listener for internet traffic (a Cloudflare Tunnel): API routes only
+    let public_bind_addr = std::env::var("PUBLIC_BIND_ADDR").ok().filter(|s| !s.is_empty());
 
     let pool = SqlitePool::connect(&db_url).await.expect("Failed to connect to database");
     db::migrate(&pool).await;
@@ -67,11 +71,60 @@ async fn main() {
         guard: guard::AuthGuard::default(),
         admission: tokio::sync::Mutex::new(()),
         lazycat,
+        tunnel: tunnel::Tunnel::new(std::env::var("CLOUDFLARED_PATH").ok(), public_bind_addr.as_deref()),
     });
     catalog::spawn_refresher(state.clone());
+    tunnel::spawn(state.clone());
 
-    // API routes: the caller's key is checked before the request body is read
-    let api = Router::new()
+    let app = Router::new()
+        .route("/", get(page_index))
+        .route("/admin", get(page_admin))
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/auth/register", post(auth::register))
+        .route("/auth/login", post(auth::login))
+        .route("/auth/sso", get(auth::sso))
+        .route("/user/api-key", get(auth::get_api_key))
+        .route("/user/api-key/refresh", post(auth::refresh_api_key))
+        .route("/user/usage", get(user_usage))
+        .route("/user/config", get(user_config))
+        .route("/admin/usage", get(admin_usage))
+        .route("/admin/limits", get(admin_list_limits).post(admin_create_limit))
+        .route("/admin/limits/:id", delete(admin_delete_limit))
+        .route("/admin/users", get(admin_list_users).post(admin_create_user))
+        .route("/admin/users/:id", delete(admin_delete_user))
+        .route("/admin/providers", get(admin_list_providers).post(admin_create_provider))
+        .route("/admin/providers/:id", put(admin_update_provider).delete(admin_delete_provider))
+        .route("/admin/keys/:provider_id", get(admin_list_provider_keys).post(admin_create_provider_key))
+        .route("/admin/keys/delete/:id", delete(admin_delete_provider_key))
+        .route("/admin/catalog", get(admin_catalog))
+        .route("/admin/catalog/refresh", post(admin_refresh_catalog))
+        .route("/admin/tunnel", get(admin_tunnel_status).put(admin_set_tunnel))
+        .route("/admin/public-url", put(admin_set_public_url))
+        // Nothing outside the API needs a big body; unauthenticated callers can reach /auth
+        .layer(DefaultBodyLimit::max(64 * 1024))
+        .merge(api_routes(&state))
+        .layer(middleware::map_response(security_headers))
+        .with_state(state.clone());
+
+    if let Some(addr) = public_bind_addr {
+        let public = api_routes(&state)
+            .layer(axum::Extension(guard::PublicRequest))
+            .layer(middleware::map_response(security_headers))
+            .with_state(state.clone());
+        println!("Public API listening on {addr}");
+        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+        tokio::spawn(async move { axum::serve(listener, public).await.unwrap() });
+    }
+
+    println!("API Relay listening on {bind_addr}");
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+
+/// The API: the caller's key is checked before the request body is read.
+/// Served on the main listener and, alone, on the public one.
+fn api_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
         .route("/models", get(relay::list_models))
         .route("/v1/models", get(relay::list_models))
         .route("/v1/models/*id", get(relay::get_model))
@@ -87,38 +140,7 @@ async fn main() {
         .route_layer(middleware::from_fn_with_state(state.clone(), relay::require_api_key))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         // Browser-based API clients need CORS; the pages and admin API don't
-        .layer(CorsLayer::permissive());
-
-    let app = Router::new()
-        .route("/", get(page_index))
-        .route("/admin", get(page_admin))
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/auth/register", post(auth::register))
-        .route("/auth/login", post(auth::login))
-        .route("/auth/sso", get(auth::sso))
-        .route("/user/api-key", get(auth::get_api_key))
-        .route("/user/api-key/refresh", post(auth::refresh_api_key))
-        .route("/user/usage", get(user_usage))
-        .route("/admin/usage", get(admin_usage))
-        .route("/admin/limits", get(admin_list_limits).post(admin_create_limit))
-        .route("/admin/limits/:id", delete(admin_delete_limit))
-        .route("/admin/users", get(admin_list_users).post(admin_create_user))
-        .route("/admin/users/:id", delete(admin_delete_user))
-        .route("/admin/providers", get(admin_list_providers).post(admin_create_provider))
-        .route("/admin/providers/:id", put(admin_update_provider).delete(admin_delete_provider))
-        .route("/admin/keys/:provider_id", get(admin_list_provider_keys).post(admin_create_provider_key))
-        .route("/admin/keys/delete/:id", delete(admin_delete_provider_key))
-        .route("/admin/catalog", get(admin_catalog))
-        .route("/admin/catalog/refresh", post(admin_refresh_catalog))
-        // Nothing outside the API needs a big body; unauthenticated callers can reach /auth
-        .layer(DefaultBodyLimit::max(64 * 1024))
-        .merge(api)
-        .layer(middleware::map_response(security_headers))
-        .with_state(state);
-
-    println!("API Relay listening on {bind_addr}");
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+        .layer(CorsLayer::permissive())
 }
 
 async fn security_headers(mut resp: Response) -> Response {
@@ -304,5 +326,50 @@ async fn admin_create_limit(State(state): State<Arc<AppState>>, headers: HeaderM
 async fn admin_delete_limit(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(id): Path<i64>) -> Result<StatusCode, StatusCode> {
     auth::require_admin(&state, &headers).await?;
     db::delete_limit(&state.db, id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Tunnel ──
+
+async fn admin_tunnel_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<tunnel::TunnelStatus>, StatusCode> {
+    auth::require_admin(&state, &headers).await?;
+    Ok(Json(state.tunnel.status()))
+}
+
+#[derive(Deserialize)]
+struct TunnelReq { token: String }
+
+/// Set the Cloudflare Tunnel token; an empty token turns the tunnel off.
+async fn admin_set_tunnel(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(req): Json<TunnelReq>) -> Result<Json<tunnel::TunnelStatus>, StatusCode> {
+    auth::require_admin(&state, &headers).await?;
+    if !state.tunnel.status().available {
+        return Err(StatusCode::NOT_IMPLEMENTED);
+    }
+    state.tunnel.set_token(&state, &req.token).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(state.tunnel.status()))
+}
+
+// ── Public URL ──
+
+const PUBLIC_URL_SETTING: &str = "public_url";
+
+/// What the home page should tell users to configure: the public address when there is one.
+async fn user_config(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<serde_json::Value>, StatusCode> {
+    auth::current_user(&state, &headers).await?;
+    let public_url = db::get_setting(&state.db, PUBLIC_URL_SETTING).await.ok().flatten().filter(|u| !u.is_empty());
+    Ok(Json(serde_json::json!({ "public_url": public_url })))
+}
+
+#[derive(Deserialize)]
+struct PublicUrlReq { url: String }
+
+async fn admin_set_public_url(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(req): Json<PublicUrlReq>) -> Result<StatusCode, StatusCode> {
+    auth::require_admin(&state, &headers).await?;
+    let url = req.url.trim().trim_end_matches('/');
+    let valid = url.is_empty() || reqwest::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "https" | "http") && u.host_str().is_some() && u.path() == "/");
+    if !valid {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    db::set_setting(&state.db, PUBLIC_URL_SETTING, url).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::NO_CONTENT)
 }

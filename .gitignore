@@ -2,3 +2,4 @@ relay.db
 target/
 lazycat/content/
 *.lpk
+lazycat/cache/
