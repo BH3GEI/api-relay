@@ -1,5 +1,5 @@
 package: bh3gei.lzcapp.api-relay
-version: 0.2.3
+version: 0.2.6
 name: API Relay
 description: >-
   One endpoint and one key for all your AI coding plans. Pools upstream keys with automatic

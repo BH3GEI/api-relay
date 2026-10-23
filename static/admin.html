@@ -7,11 +7,11 @@
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; padding: 40px 20px; }
-.container { max-width: 900px; margin: 0 auto; }
+.container { max-width: 1100px; margin: 0 auto; }
 h1 { font-size: 24px; margin-bottom: 8px; color: #fff; }
 h2 { font-size: 18px; margin: 24px 0 12px; color: #ccc; }
 .subtitle { color: #666; margin-bottom: 24px; }
-.card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+.card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 20px; margin-bottom: 16px; overflow-x: auto; }
 input, select { padding: 8px 10px; border: 1px solid #333; border-radius: 6px; background: #111; color: #fff; font-size: 14px; margin-right: 8px; margin-bottom: 8px; }
 button { padding: 8px 16px; border: none; border-radius: 6px; background: #2563eb; color: #fff; font-size: 13px; cursor: pointer; margin-right: 4px; }
 button:hover { background: #1d4ed8; }
@@ -22,7 +22,10 @@ button:hover { background: #1d4ed8; }
 .secondary:hover { background: #444; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #222; }
-th { color: #888; font-weight: 600; }
+th { color: #888; font-weight: 600; white-space: nowrap; }
+td.actions { white-space: nowrap; text-align: right; }
+.url { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+.url-label { color: #666; font-size: 11px; margin-right: 4px; }
 .hidden { display: none; }
 .msg { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }
 .msg.error { background: #3b1111; color: #f87171; }
@@ -81,18 +84,18 @@ th { color: #888; font-weight: 600; }
       <input id="p-models" placeholder="Extra models, comma-separated (optional)" style="width:240px">
       <button onclick="createProvider()">Add</button>
     </div>
-    <table><thead><tr><th>ID</th><th>Name</th><th>Keys</th><th>Base URL</th><th>Anthropic Base URL</th><th>Extra Models</th><th>User-Agent</th><th>Enabled</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>
+    <table><thead><tr><th>Name</th><th>Keys</th><th>Endpoints</th><th>Extra Models</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>
 
     <div id="keys-section" class="hidden" style="margin-top:16px;padding-top:16px;border-top:1px solid #333">
       <h2 id="keys-title">Keys</h2>
-      <p style="color:#888;font-size:13px">Status is what the relay has seen since it last started. Refreshes every 10s.</p>
+      <p style="color:#888;font-size:13px">Status is what the relay has seen since it last started. Quota comes from the upstream (hover for reset time; n/a when the upstream doesn't report it). Refreshes every 10s.</p>
       <div style="margin-bottom:12px">
         <input id="k-key" placeholder="API Key" style="width:280px">
         <input id="k-label" placeholder="Label (optional)" style="width:120px">
         <input id="k-priority" placeholder="Priority" value="0" style="width:60px" type="number">
         <button onclick="createKey()">Add Key</button>
       </div>
-      <table><thead><tr><th>ID</th><th>Label</th><th>API Key</th><th>Priority</th><th>Status</th><th>Last Used</th><th>OK / Failed</th><th></th></tr></thead><tbody id="keys-body"></tbody></table>
+      <table><thead><tr><th>ID</th><th>Label</th><th>API Key</th><th>Priority</th><th>Status</th><th>Quota used</th><th>Last Used</th><th>OK / Failed</th><th></th></tr></thead><tbody id="keys-body"></tbody></table>
     </div>
   </div>
 
@@ -113,14 +116,20 @@ th { color: #888; font-weight: 600; }
   <!-- Limits -->
   <div id="tab-limits" class="card hidden">
     <h2>Usage Limits</h2>
+    <p style="color:#888;font-size:13px">Windows are rolling (the last 5 hours / day / week). Tokens include cached input. A request over any limit gets 429. 0 blocks.</p>
     <div style="margin-bottom:12px">
       <select id="lim-user"></select>
       <input id="lim-model" placeholder="Model id, e.g. kimi/k3 (* = all)" value="*" style="width:200px">
-      <input id="lim-req" placeholder="Max req/day (-1=∞)" value="-1" style="width:130px" type="number">
-      <input id="lim-tok" placeholder="Max tok/day (-1=∞)" value="-1" style="width:130px" type="number">
+      <select id="lim-window">
+        <option value="18000">per 5 hours</option>
+        <option value="86400" selected>per day</option>
+        <option value="604800">per week</option>
+      </select>
+      <input id="lim-req" placeholder="Max requests (empty = ∞)" style="width:170px" type="number" min="0">
+      <input id="lim-tok" placeholder="Max tokens (empty = ∞)" style="width:170px" type="number" min="0">
       <button onclick="createLimit()">Set Limit</button>
     </div>
-    <table><thead><tr><th>ID</th><th>User</th><th>Model</th><th>Max Req/Day</th><th>Max Tok/Day</th><th></th></tr></thead><tbody id="limits-body"></tbody></table>
+    <table><thead><tr><th>User</th><th>Model</th><th>Window</th><th>Requests</th><th>Tokens</th><th></th></tr></thead><tbody id="limits-body"></tbody></table>
   </div>
 
   <div style="margin-top:20px"><button class="secondary" onclick="logout()">Logout</button></div>
@@ -129,6 +138,10 @@ th { color: #888; font-weight: 600; }
 
 <script>
 const BASE = location.origin;
+// Everything shown from the server goes through this: model ids come from upstreams, names from users
+function esc(v) {
+  return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
 let token = localStorage.getItem('admin_token');
 let providers = [];
 
@@ -194,7 +207,7 @@ async function loadUsers() {
   const users = await api('/admin/users');
   const tb = document.getElementById('users-body');
   tb.innerHTML = users.map(u => `<tr>
-    <td>${u.id}</td><td>${u.username}</td><td>${u.email || '-'}</td><td><code style="font-size:11px">${u.api_key}</code></td>
+    <td>${u.id}</td><td>${esc(u.username)}</td><td>${esc(u.email || '-')}</td><td><code style="font-size:11px">${esc(u.api_key)}</code></td>
     <td>${u.is_admin ? 'Yes' : 'No'}</td>
     <td><button class="btn-danger btn-sm" onclick="deleteUser(${u.id})">Delete</button></td>
   </tr>`).join('');
@@ -229,10 +242,15 @@ async function loadProviders() {
   const keyLists = await Promise.all(providers.map(p => api(`/admin/keys/${p.id}`).catch(() => [])));
   const tb = document.getElementById('providers-body');
   tb.innerHTML = providers.map((p, i) => `<tr>
-    <td>${p.id}</td><td>${p.name}</td><td style="white-space:nowrap">${keySummary(keyLists[i])}</td><td>${p.base_url}</td><td>${p.anthropic_base_url || '-'}</td><td>${p.models || '-'}</td><td>${p.user_agent}</td>
-    <td>${p.enabled ? 'Yes' : 'No'}</td>
+    <td><strong>${esc(p.name)}</strong>${p.enabled ? '' : ' <span style="color:#888">(disabled)</span>'}</td>
+    <td style="white-space:nowrap">${keySummary(keyLists[i])}</td>
     <td>
-      <button class="btn-sm secondary" onclick="showKeys(${p.id},'${p.name}')">Manage Keys</button>
+      <div><span class="url-label">OpenAI</span><span class="url">${esc(p.base_url)}</span></div>
+      <div><span class="url-label">Anthropic</span><span class="url">${esc(p.anthropic_base_url || '(derived)')}</span></div>
+    </td>
+    <td>${esc(p.models || '-')}</td>
+    <td class="actions">
+      <button class="btn-sm secondary" onclick="showKeys(${p.id})">Manage Keys</button>
       <button class="btn-danger btn-sm" onclick="deleteProvider(${p.id})">Delete</button>
     </td>
   </tr>`).join('');
@@ -256,7 +274,7 @@ async function deleteProvider(id) {
 
 // Models
 function renderModels(ids) {
-  document.getElementById('models-body').innerHTML = ids.map(id => `<tr><td><code>${id}</code></td></tr>`).join('')
+  document.getElementById('models-body').innerHTML = ids.map(id => `<tr><td><code>${esc(id)}</code></td></tr>`).join('')
     || '<tr><td style="color:#666">No models yet. Add a provider and a key.</td></tr>';
 }
 async function loadModels() { renderModels(await api('/admin/catalog')); }
@@ -266,7 +284,7 @@ async function refreshModels() { renderModels(await api('/admin/catalog/refresh'
 async function loadUsage() {
   const usage = await api('/admin/usage');
   document.getElementById('usage-body').innerHTML = usage.map(u =>
-    `<tr><td>${u.username}</td><td>${u.model}</td><td>${u.requests}</td><td>${u.total_tokens}</td></tr>`
+    `<tr><td>${esc(u.username)}</td><td>${esc(u.model)}</td><td>${u.requests}</td><td>${u.total_tokens.toLocaleString()}</td></tr>`
   ).join('') || '<tr><td colspan="4" style="color:#666">No usage today</td></tr>';
 }
 
@@ -276,11 +294,21 @@ async function loadLimits() {
   const limits = await api('/admin/limits');
   if (!allUsers.length) {
     allUsers = await api('/admin/users');
-    document.getElementById('lim-user').innerHTML = allUsers.map(u => `<option value="${u.id}">${u.username}</option>`).join('');
+    document.getElementById('lim-user').innerHTML = allUsers.map(u => `<option value="${u.id}">${esc(u.username)}</option>`).join('');
   }
+  const windows = { 18000: '5 hours', 86400: 'day', 604800: 'week' };
+  // "30,000 / 110,000,000" — usage in the current window against the cap
+  const cell = (used, max) => {
+    if (max < 0) return `${used.toLocaleString()} <span style="color:#666">/ ∞</span>`;
+    const color = used >= max ? '#f87171' : used >= max * 0.8 ? '#fbbf24' : '#e0e0e0';
+    return `<span style="color:${color}">${used.toLocaleString()}</span> <span style="color:#666">/ ${max.toLocaleString()}</span>`;
+  };
   document.getElementById('limits-body').innerHTML = limits.map(l => {
     const uname = allUsers.find(u => u.id === l.user_id)?.username || l.user_id;
-    return `<tr><td>${l.id}</td><td>${uname}</td><td>${l.model}</td><td>${l.max_requests_daily < 0 ? '∞' : l.max_requests_daily}</td><td>${l.max_tokens_daily < 0 ? '∞' : l.max_tokens_daily}</td><td><button class="btn-danger btn-sm" onclick="deleteLimit(${l.id})">Delete</button></td></tr>`;
+    return `<tr><td>${esc(uname)}</td><td>${esc(l.model)}</td><td>${windows[l.window_secs] || l.window_secs + 's'}</td>
+      <td style="white-space:nowrap">${cell(l.used.requests, l.max_requests)}</td>
+      <td style="white-space:nowrap">${cell(l.used.total_tokens, l.max_tokens)}</td>
+      <td class="actions"><button class="btn-danger btn-sm" onclick="deleteLimit(${l.id})">Delete</button></td></tr>`;
   }).join('') || '<tr><td colspan="6" style="color:#666">No limits set</td></tr>';
 }
 // Empty means unlimited (-1); 0 is a real limit that blocks the model
@@ -289,12 +317,17 @@ function limitValue(id) {
   return Number.isNaN(v) ? -1 : v;
 }
 async function createLimit() {
-  await api('/admin/limits', { method:'POST', body: JSON.stringify({
-    user_id: parseInt(document.getElementById('lim-user').value),
-    model: document.getElementById('lim-model').value || '*',
-    max_requests_daily: limitValue('lim-req'),
-    max_tokens_daily: limitValue('lim-tok')
-  })});
+  try {
+    await api('/admin/limits', { method:'POST', body: JSON.stringify({
+      user_id: parseInt(document.getElementById('lim-user').value),
+      model: document.getElementById('lim-model').value || '*',
+      window_secs: parseInt(document.getElementById('lim-window').value),
+      max_requests: limitValue('lim-req'),
+      max_tokens: limitValue('lim-tok')
+    })});
+  } catch (e) {
+    alert('Could not set the limit. The model must be a full id from the Models tab (e.g. kimi/k3), or * for all.');
+  }
   loadLimits();
 }
 async function deleteLimit(id) {
@@ -306,8 +339,9 @@ async function deleteLimit(id) {
 // Keys
 let currentProviderId = null;
 let keysTimer = null;
-async function showKeys(pid, pname) {
+async function showKeys(pid) {
   currentProviderId = pid;
+  const pname = providers.find(p => p.id === pid)?.name ?? pid;
   document.getElementById('keys-title').textContent = `Keys for "${pname}"`;
   document.getElementById('keys-section').classList.remove('hidden');
   await renderKeys();
@@ -333,11 +367,22 @@ function keyStatus(st) {
   const reason = FAIL_REASONS[st.last_result] || st.last_result;
   if (st.cooling_secs > 0) {
     const left = st.cooling_secs >= 60 ? Math.ceil(st.cooling_secs / 60) + 'm' : st.cooling_secs + 's';
-    return `<span style="color:#f87171">Cooling ${left}</span> <span style="color:#888">(${reason})</span>`;
+    return `<span style="color:#f87171">Cooling ${left}</span> <span style="color:#888">(${esc(reason)})</span>`;
   }
   if (!st.last_result) return '<span style="color:#888">Unused</span>';
-  if (FAIL_REASONS[st.last_result]) return `<span style="color:#fbbf24">Ready</span> <span style="color:#888">(last: ${reason})</span>`;
+  if (FAIL_REASONS[st.last_result]) return `<span style="color:#fbbf24">Ready</span> <span style="color:#888">(last: ${esc(reason)})</span>`;
   return '<span style="color:#4ade80">OK</span>';
+}
+
+// "5h 41% · week 29%", colored by how close each window is to its limit
+function quotaCell(windows) {
+  if (!windows) return '<span style="color:#666">n/a</span>';
+  return windows.map(w => {
+    const pct = Math.round(w.used_percent);
+    const color = pct >= 80 ? '#f87171' : pct >= 50 ? '#fbbf24' : '#4ade80';
+    const reset = w.resets_at ? 'resets ' + new Date(w.resets_at * 1000).toLocaleString() : '';
+    return `<span title="${reset}"><span style="color:#888">${esc(w.label)}</span> <span style="color:${color}">${pct}%</span></span>`;
+  }).join(' · ');
 }
 
 async function renderKeys() {
@@ -345,13 +390,14 @@ async function renderKeys() {
   // Requests go to the first key (by priority) that isn't cooling down
   const inUse = keys.find(k => k.enabled && k.status.cooling_secs === 0);
   document.getElementById('keys-body').innerHTML = keys.map(k => `<tr>
-    <td>${k.id}</td><td>${k.label || '-'}${k === inUse ? ' <span style="color:#2563eb">● in use</span>' : ''}</td>
-    <td><code style="font-size:11px">***${k.api_key.slice(-8)}</code></td>
+    <td>${k.id}</td><td>${esc(k.label || '-')}${k === inUse ? ' <span style="color:#2563eb">● in use</span>' : ''}</td>
+    <td><code style="font-size:11px">${esc(k.api_key)}</code></td>
     <td>${k.priority}</td>
     <td>${keyStatus(k.status)}</td>
+    <td style="white-space:nowrap">${quotaCell(k.quota)}</td>
     <td>${ago(k.status.last_used)}</td>
     <td>${k.status.ok} / ${k.status.failed}</td>
-    <td><button class="btn-danger btn-sm" onclick="deleteKey(${k.id})">Delete</button></td>
+    <td class="actions"><button class="btn-danger btn-sm" onclick="deleteKey(${k.id})">Delete</button></td>
   </tr>`).join('');
 }
 async function createKey() {

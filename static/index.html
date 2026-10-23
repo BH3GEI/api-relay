@@ -229,6 +229,9 @@ a:hover { text-decoration: underline; }
 
 <script>
 const BASE = location.origin;
+function esc(v) {
+  return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
 document.querySelectorAll('.base-url').forEach(el => el.textContent = BASE);
 let token = localStorage.getItem('token');
 let apiKey = '';
@@ -319,7 +322,7 @@ async function loadDashboard() {
       } else {
         let totalReq = 0, totalTok = 0;
         ut.innerHTML = '<tr><th style="color:#888;font-weight:600">Model</th><th style="color:#888;font-weight:600">Requests / Tokens</th></tr>' +
-          usageData.map(u => { totalReq += u.requests; totalTok += u.total_tokens; return `<tr><td>${u.model}</td><td>${u.requests} req / ${u.total_tokens} tok</td></tr>`; }).join('') +
+          usageData.map(u => { totalReq += u.requests; totalTok += u.total_tokens; return `<tr><td>${esc(u.model)}</td><td>${u.requests} req / ${u.total_tokens} tok</td></tr>`; }).join('') +
           `<tr style="border-top:2px solid #333"><td><strong>Total</strong></td><td><strong>${totalReq} req / ${totalTok} tok</strong></td></tr>`;
       }
     } catch(e) {}

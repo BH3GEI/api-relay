@@ -59,11 +59,15 @@ impl Catalog {
         let entry = match self.find(name) {
             Some(e) => e,
             None => {
-                let stale = self.refreshed_at.read().unwrap().map_or(true, |t| t.elapsed() > MISS_REFRESH_AFTER);
-                if !stale {
+                if !self.stale() {
                     return None;
                 }
-                self.refresh(state).await;
+                let _guard = self.refreshing.lock().await;
+                // Requests that waited for someone else's refresh shouldn't each start another
+                if self.stale() {
+                    self.rebuild(state).await;
+                }
+                drop(_guard);
                 self.find(name)?
             }
         };
@@ -72,10 +76,18 @@ impl Catalog {
         Some((provider, entry))
     }
 
+    fn stale(&self) -> bool {
+        self.refreshed_at.read().unwrap().map_or(true, |t| t.elapsed() > MISS_REFRESH_AFTER)
+    }
+
     /// Rebuild the catalog from every enabled provider's model list.
     /// A provider whose list can't be fetched keeps the models it had before.
     pub async fn refresh(&self, state: &AppState) {
         let _guard = self.refreshing.lock().await;
+        self.rebuild(state).await;
+    }
+
+    async fn rebuild(&self, state: &AppState) {
         let Ok(providers) = db::list_enabled_providers(&state.db).await else { return };
 
         let previous: HashMap<i64, Vec<Entry>> = self.entries().into_iter().fold(HashMap::new(), |mut m, e| {
@@ -91,7 +103,7 @@ impl Catalog {
                     old.iter().map(|e| (e.upstream_model.clone(), e.meta.clone())).collect()
                 }).unwrap_or_default(),
             };
-            for id in p.models.split(|c: char| c == ',' || c.is_whitespace()).filter(|s| !s.is_empty()) {
+            for id in p.models.split(|c: char| c == ',' || c.is_whitespace()).filter(|s| valid_model_id(s)) {
                 if !models.iter().any(|(m, _)| m == id) {
                     models.push((id.to_string(), Value::Object(Default::default())));
                 }
@@ -130,8 +142,15 @@ async fn fetch_models(state: &AppState, p: &db::Provider) -> Option<Vec<(String,
     let body: Value = resp.json().await.ok()?;
     let listed = body["data"].as_array()?.iter()
         .filter_map(|m| Some((m["id"].as_str()?.to_string(), m.clone())))
+        // Ids end up in URLs and pages; an upstream shouldn't be able to slip markup into them
+        .filter(|(id, _)| valid_model_id(id))
         .collect();
     Some(listed)
+}
+
+fn valid_model_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || "._:/@+-[]".contains(c))
 }
 
 /// Keep the catalog fresh in the background.

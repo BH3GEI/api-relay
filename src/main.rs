@@ -1,9 +1,9 @@
 use axum::{
     Router,
     extract::{DefaultBodyLimit, Json, Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware,
-    response::Html,
+    response::{Html, Response},
     routing::{delete, get, post, put},
 };
 use serde::Deserialize;
@@ -14,8 +14,11 @@ use tower_http::cors::CorsLayer;
 mod auth;
 mod catalog;
 mod db;
+mod guard;
 mod pool;
+mod quota;
 mod relay;
+mod usage;
 
 pub struct AppState {
     pub db: SqlitePool,
@@ -23,6 +26,10 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub keys: pool::KeyPool,
     pub catalog: catalog::Catalog,
+    pub quota: quota::QuotaCache,
+    pub guard: guard::AuthGuard,
+    /// Serializes limit checks with recording the request, so parallel requests can't overshoot a limit
+    pub admission: tokio::sync::Mutex<()>,
     /// Running as a LazyCat app: trust the identity headers its gateway sets
     pub lazycat: bool,
 }
@@ -43,6 +50,8 @@ async fn main() {
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(86400))
         .pool_max_idle_per_host(20)
+        // A redirect could carry x-api-key to another host
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
 
@@ -54,6 +63,9 @@ async fn main() {
         http_client,
         keys: pool::KeyPool::default(),
         catalog: catalog::Catalog::default(),
+        quota: quota::QuotaCache::default(),
+        guard: guard::AuthGuard::default(),
+        admission: tokio::sync::Mutex::new(()),
         lazycat,
     });
     catalog::spawn_refresher(state.clone());
@@ -62,6 +74,7 @@ async fn main() {
     let api = Router::new()
         .route("/models", get(relay::list_models))
         .route("/v1/models", get(relay::list_models))
+        .route("/v1/models/*id", get(relay::get_model))
         .route("/v1/chat/completions", post(relay::chat_completions))
         .route("/v1/responses", post(relay::responses))
         .route("/v1/messages", post(relay::anthropic_messages))
@@ -71,10 +84,12 @@ async fn main() {
         .route("/v1/files", post(relay::files_upload).get(relay::files_list))
         .route("/v1/files/:file_id", get(relay::files_action).delete(relay::files_delete))
         .route("/v1/files/:file_id/content", get(relay::files_content))
-        .route_layer(middleware::from_fn_with_state(state.clone(), relay::require_api_key));
+        .route_layer(middleware::from_fn_with_state(state.clone(), relay::require_api_key))
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
+        // Browser-based API clients need CORS; the pages and admin API don't
+        .layer(CorsLayer::permissive());
 
     let app = Router::new()
-        .merge(api)
         .route("/", get(page_index))
         .route("/admin", get(page_admin))
         .route("/healthz", get(|| async { "ok" }))
@@ -95,13 +110,22 @@ async fn main() {
         .route("/admin/keys/delete/:id", delete(admin_delete_provider_key))
         .route("/admin/catalog", get(admin_catalog))
         .route("/admin/catalog/refresh", post(admin_refresh_catalog))
-        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
-        .layer(CorsLayer::permissive())
+        // Nothing outside the API needs a big body; unauthenticated callers can reach /auth
+        .layer(DefaultBodyLimit::max(64 * 1024))
+        .merge(api)
+        .layer(middleware::map_response(security_headers))
         .with_state(state);
 
     println!("API Relay listening on {bind_addr}");
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn security_headers(mut resp: Response) -> Response {
+    let h = resp.headers_mut();
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    resp
 }
 
 async fn page_index() -> Html<&'static str> {
@@ -195,14 +219,18 @@ struct KeyWithStatus {
     #[serde(flatten)]
     key: db::ProviderKey,
     status: pool::KeyStatus,
+    /// Plan usage windows, when the upstream reports them
+    quota: Option<Vec<quota::Window>>,
 }
 
 async fn admin_list_provider_keys(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(provider_id): Path<i64>) -> Result<Json<Vec<KeyWithStatus>>, StatusCode> {
     auth::require_admin(&state, &headers).await?;
+    let provider = db::get_provider(&state.db, provider_id).await.map_err(|_| StatusCode::NOT_FOUND)?;
     let keys = db::list_provider_keys(&state.db, provider_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(keys.into_iter().map(|key| {
+    let quotas = futures::future::join_all(keys.iter().map(|k| state.quota.get(&state, &provider, &k.api_key))).await;
+    Ok(Json(keys.into_iter().zip(quotas).map(|(key, quota)| {
         let status = state.keys.status(&key.api_key);
-        KeyWithStatus { key, status }
+        KeyWithStatus { key, status, quota }
     }).collect()))
 }
 
@@ -226,9 +254,7 @@ async fn admin_delete_provider_key(State(state): State<Arc<AppState>>, headers: 
 // ── Usage & Limits ──
 
 async fn user_usage(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Vec<db::UsageStats>>, StatusCode> {
-    let token = auth::extract_bearer(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    let claims = auth::decode_jwt(&state, &token)?;
-    let user = db::find_user_by_username(&state.db, &claims.sub).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    let user = auth::current_user(&state, &headers).await?;
     db::get_user_usage_today(&state.db, user.id).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
@@ -237,17 +263,41 @@ async fn admin_usage(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
     db::get_all_usage_today(&state.db).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-async fn admin_list_limits(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Vec<db::UsageLimit>>, StatusCode> {
+#[derive(serde::Serialize)]
+struct LimitWithUsage {
+    #[serde(flatten)]
+    limit: db::UsageLimit,
+    /// Usage so far in the limit's current window
+    used: db::WindowUsage,
+}
+
+async fn admin_list_limits(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Vec<LimitWithUsage>>, StatusCode> {
     auth::require_admin(&state, &headers).await?;
-    db::list_limits(&state.db).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let limits = db::list_limits(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut out = Vec::with_capacity(limits.len());
+    for limit in limits {
+        let used = db::window_usage(&state.db, limit.user_id, &limit.model, limit.window_secs).await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        out.push(LimitWithUsage { limit, used });
+    }
+    Ok(Json(out))
 }
 
 #[derive(Deserialize)]
-struct LimitReq { user_id: i64, model: Option<String>, max_requests_daily: Option<i64>, max_tokens_daily: Option<i64> }
+struct LimitReq { user_id: i64, model: Option<String>, window_secs: Option<i64>, max_requests: Option<i64>, max_tokens: Option<i64> }
 
 async fn admin_create_limit(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(req): Json<LimitReq>) -> Result<Json<db::UsageLimit>, StatusCode> {
     auth::require_admin(&state, &headers).await?;
-    db::create_limit(&state.db, req.user_id, req.model.as_deref().unwrap_or("*"), req.max_requests_daily.unwrap_or(-1), req.max_tokens_daily.unwrap_or(-1))
+    let model = req.model.as_deref().unwrap_or("*");
+    // A limit on a name that isn't a catalog id would silently never match
+    if model != "*" && !state.catalog.entries().iter().any(|e| e.id == model) {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let window = req.window_secs.unwrap_or(86400);
+    if window <= 0 {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    db::create_limit(&state.db, req.user_id, model, window, req.max_requests.unwrap_or(-1), req.max_tokens.unwrap_or(-1))
         .await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 

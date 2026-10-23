@@ -19,6 +19,8 @@ pub struct Provider {
     pub name: String,
     pub base_url: String,
     pub user_agent: String,
+    /// Legacy, unused; never sent to the browser
+    #[serde(skip)]
     pub api_key: Option<String>,
     pub enabled: bool,
     pub anthropic_base_url: String,
@@ -30,10 +32,17 @@ pub struct Provider {
 pub struct ProviderKey {
     pub id: i64,
     pub provider_id: i64,
+    /// Only the last characters ever leave the server
+    #[serde(serialize_with = "serialize_key_tail")]
     pub api_key: String,
     pub label: String,
     pub enabled: bool,
     pub priority: i64,
+}
+
+fn serialize_key_tail<S: serde::Serializer>(key: &str, s: S) -> Result<S::Ok, S::Error> {
+    let tail = key.char_indices().rev().nth(3).map_or(key, |(i, _)| &key[i..]);
+    s.serialize_str(&format!("…{tail}"))
 }
 
 pub async fn migrate(pool: &SqlitePool) {
@@ -97,11 +106,36 @@ pub async fn migrate(pool: &SqlitePool) {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             model TEXT NOT NULL DEFAULT '*',
-            max_requests_daily INTEGER DEFAULT -1,
-            max_tokens_daily INTEGER DEFAULT -1,
-            UNIQUE(user_id, model)
+            window_secs INTEGER NOT NULL DEFAULT 86400,
+            max_requests INTEGER DEFAULT -1,
+            max_tokens INTEGER DEFAULT -1,
+            UNIQUE(user_id, model, window_secs)
         )"
     ).execute(pool).await.unwrap();
+    // Migration: limits used to be per calendar day only
+    let (has_window,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('usage_limits') WHERE name = 'window_secs'")
+        .fetch_one(pool).await.unwrap();
+    if has_window == 0 {
+        let mut tx = pool.begin().await.unwrap();
+        for stmt in [
+            "CREATE TABLE usage_limits_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                model TEXT NOT NULL DEFAULT '*',
+                window_secs INTEGER NOT NULL DEFAULT 86400,
+                max_requests INTEGER DEFAULT -1,
+                max_tokens INTEGER DEFAULT -1,
+                UNIQUE(user_id, model, window_secs)
+            )",
+            "INSERT INTO usage_limits_new (id, user_id, model, window_secs, max_requests, max_tokens)
+                SELECT id, user_id, model, 86400, max_requests_daily, max_tokens_daily FROM usage_limits",
+            "DROP TABLE usage_limits",
+            "ALTER TABLE usage_limits_new RENAME TO usage_limits",
+        ] {
+            sqlx::query(stmt).execute(&mut *tx).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS settings (
@@ -196,6 +230,10 @@ pub async fn update_provider(pool: &SqlitePool, id: i64, p: &ProviderInput<'_>) 
     ).bind(p.name).bind(p.base_url).bind(p.anthropic_base_url).bind(p.user_agent).bind(p.api_key).bind(p.models).bind(p.enabled).bind(id).fetch_one(pool).await
 }
 
+pub async fn get_provider(pool: &SqlitePool, id: i64) -> Result<Provider, sqlx::Error> {
+    sqlx::query_as("SELECT * FROM providers WHERE id = ?").bind(id).fetch_one(pool).await
+}
+
 pub async fn get_enabled_provider(pool: &SqlitePool, id: i64) -> Result<Provider, sqlx::Error> {
     sqlx::query_as("SELECT * FROM providers WHERE id = ? AND enabled = TRUE").bind(id).fetch_one(pool).await
 }
@@ -235,31 +273,37 @@ pub async fn delete_provider_key(pool: &SqlitePool, id: i64) -> Result<(), sqlx:
 
 // ── Usage Logging ──
 
-pub async fn log_usage(pool: &SqlitePool, user_id: i64, model: &str, input_tokens: i64, output_tokens: i64) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO usage_logs (user_id, model, input_tokens, output_tokens) VALUES (?, ?, ?, ?)")
-        .bind(user_id).bind(model).bind(input_tokens).bind(output_tokens).execute(pool).await?;
+/// Record a request as it starts, so concurrent requests count against limits; tokens are filled in later.
+pub async fn start_usage(pool: &SqlitePool, user_id: i64, model: &str) -> Result<i64, sqlx::Error> {
+    let (id,): (i64,) = sqlx::query_as("INSERT INTO usage_logs (user_id, model) VALUES (?, ?) RETURNING id")
+        .bind(user_id).bind(model).fetch_one(pool).await?;
+    Ok(id)
+}
+
+pub async fn finish_usage(pool: &SqlitePool, id: i64, input_tokens: i64, output_tokens: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE usage_logs SET input_tokens = ?, output_tokens = ? WHERE id = ?")
+        .bind(input_tokens).bind(output_tokens).bind(id).execute(pool).await?;
+    Ok(())
+}
+
+/// Forget a request the upstream refused, so it doesn't count.
+pub async fn drop_usage(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM usage_logs WHERE id = ?").bind(id).execute(pool).await?;
     Ok(())
 }
 
 #[derive(Serialize, sqlx::FromRow)]
-pub struct DailyUsage {
+pub struct WindowUsage {
     pub requests: i64,
     pub total_tokens: i64,
 }
 
-pub async fn get_daily_usage(pool: &SqlitePool, user_id: i64, model: &str) -> Result<DailyUsage, sqlx::Error> {
-    let row: DailyUsage = if model == "*" {
-        sqlx::query_as(
-            "SELECT COUNT(*) as requests, COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens
-             FROM usage_logs WHERE user_id = ? AND date(created_at) = date('now')"
-        ).bind(user_id).fetch_one(pool).await?
-    } else {
-        sqlx::query_as(
-            "SELECT COUNT(*) as requests, COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens
-             FROM usage_logs WHERE user_id = ? AND model = ? AND date(created_at) = date('now')"
-        ).bind(user_id).bind(model).fetch_one(pool).await?
-    };
-    Ok(row)
+/// A user's usage over the last `window_secs`, for one model or all (`*`).
+pub async fn window_usage(pool: &SqlitePool, user_id: i64, model: &str, window_secs: i64) -> Result<WindowUsage, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT COUNT(*) as requests, COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens
+         FROM usage_logs WHERE user_id = ? AND (? = '*' OR model = ?) AND created_at >= datetime('now', ?)"
+    ).bind(user_id).bind(model).bind(model).bind(format!("-{window_secs} seconds")).fetch_one(pool).await
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -267,22 +311,23 @@ pub struct UsageLimit {
     pub id: i64,
     pub user_id: i64,
     pub model: String,
-    pub max_requests_daily: i64,
-    pub max_tokens_daily: i64,
+    pub window_secs: i64,
+    pub max_requests: i64,
+    pub max_tokens: i64,
 }
 
+/// Whether the user may make one more request to `model` under every limit that applies.
 pub async fn check_limit(pool: &SqlitePool, user_id: i64, model: &str) -> Result<bool, sqlx::Error> {
-    // Check model-specific limit first, then wildcard
     let limits: Vec<UsageLimit> = sqlx::query_as(
-        "SELECT * FROM usage_limits WHERE user_id = ? AND (model = ? OR model = '*') ORDER BY CASE WHEN model = '*' THEN 1 ELSE 0 END"
+        "SELECT * FROM usage_limits WHERE user_id = ? AND (model = ? OR model = '*')"
     ).bind(user_id).bind(model).fetch_all(pool).await?;
 
     for limit in &limits {
-        let usage = get_daily_usage(pool, user_id, &limit.model).await?;
-        if limit.max_requests_daily >= 0 && usage.requests >= limit.max_requests_daily {
-            return Ok(false); // Over limit
+        let usage = window_usage(pool, user_id, &limit.model, limit.window_secs).await?;
+        if limit.max_requests >= 0 && usage.requests >= limit.max_requests {
+            return Ok(false);
         }
-        if limit.max_tokens_daily >= 0 && usage.total_tokens >= limit.max_tokens_daily {
+        if limit.max_tokens >= 0 && usage.total_tokens >= limit.max_tokens {
             return Ok(false);
         }
     }
@@ -326,15 +371,15 @@ pub async fn get_all_usage_today(pool: &SqlitePool) -> Result<Vec<AdminUsageStat
 // ── Usage Limits CRUD ──
 
 pub async fn list_limits(pool: &SqlitePool) -> Result<Vec<UsageLimit>, sqlx::Error> {
-    sqlx::query_as("SELECT * FROM usage_limits ORDER BY user_id, model").fetch_all(pool).await
+    sqlx::query_as("SELECT * FROM usage_limits ORDER BY user_id, model, window_secs").fetch_all(pool).await
 }
 
-pub async fn create_limit(pool: &SqlitePool, user_id: i64, model: &str, max_requests: i64, max_tokens: i64) -> Result<UsageLimit, sqlx::Error> {
+pub async fn create_limit(pool: &SqlitePool, user_id: i64, model: &str, window_secs: i64, max_requests: i64, max_tokens: i64) -> Result<UsageLimit, sqlx::Error> {
     sqlx::query_as(
-        "INSERT INTO usage_limits (user_id, model, max_requests_daily, max_tokens_daily) VALUES (?, ?, ?, ?)
-         ON CONFLICT(user_id, model) DO UPDATE SET max_requests_daily=excluded.max_requests_daily, max_tokens_daily=excluded.max_tokens_daily
+        "INSERT INTO usage_limits (user_id, model, window_secs, max_requests, max_tokens) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, model, window_secs) DO UPDATE SET max_requests=excluded.max_requests, max_tokens=excluded.max_tokens
          RETURNING *"
-    ).bind(user_id).bind(model).bind(max_requests).bind(max_tokens).fetch_one(pool).await
+    ).bind(user_id).bind(model).bind(window_secs).bind(max_requests).bind(max_tokens).fetch_one(pool).await
 }
 
 pub async fn delete_limit(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {

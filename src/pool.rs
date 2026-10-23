@@ -1,4 +1,3 @@
-use axum::http::StatusCode;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -15,6 +14,13 @@ const RETRY_STATUSES: &[u16] = &[401, 402, 403, 429, 502, 503, 504];
 pub struct KeyPool {
     cooldowns: Mutex<HashMap<String, Instant>>,
     stats: Mutex<HashMap<String, KeyStatus>>,
+}
+
+/// Every key was tried and none could serve the request.
+#[derive(Debug)]
+pub struct Exhausted {
+    /// Status of the last upstream answer, None when there were no keys or no answer at all
+    pub last_status: Option<u16>,
 }
 
 /// What the pool has seen of one key since the relay started.
@@ -61,16 +67,12 @@ impl KeyPool {
 
     /// Send with each key in turn until one gets a response worth returning.
     /// `build` makes the request for a given key; it is called once per attempt.
-    pub async fn send<F>(&self, keys: Vec<String>, build: F) -> Result<reqwest::Response, StatusCode>
+    pub async fn send<F>(&self, keys: Vec<String>, build: F) -> Result<reqwest::Response, Exhausted>
     where
         F: Fn(&str) -> reqwest::RequestBuilder,
     {
         let keys = self.order(keys);
-        if keys.is_empty() {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-
-        let mut last_resp = None;
+        let mut last_status = None;
         for key in &keys {
             let resp = match build(key).send().await {
                 Ok(r) => r,
@@ -91,10 +93,11 @@ impl KeyPool {
             let dur = cooldown_for(&resp);
             eprintln!("key …{}: upstream {status}, cooling {}s", tail(key), dur.as_secs());
             self.cool(key, dur);
-            last_resp = Some(resp);
+            // The body isn't passed on: upstream errors can name the account behind the key
+            last_status = Some(status);
         }
 
-        last_resp.ok_or(StatusCode::BAD_GATEWAY)
+        Err(Exhausted { last_status })
     }
 }
 

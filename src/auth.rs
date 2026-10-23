@@ -10,6 +10,9 @@ use crate::{AppState, db};
 #[derive(Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String, // username
+    /// User id, so a token stops working if its user is deleted and the name reused
+    #[serde(default)]
+    pub uid: i64,
     pub is_admin: bool,
     pub exp: usize,
 }
@@ -41,14 +44,21 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
         .is_ok()
 }
 
-fn make_jwt(state: &AppState, username: &str, is_admin: bool) -> Result<String, StatusCode> {
+fn make_jwt(state: &AppState, user: &db::User, is_admin: bool) -> Result<String, StatusCode> {
     let claims = Claims {
-        sub: username.to_string(),
+        sub: user.username.clone(),
+        uid: user.id,
         is_admin,
         exp: (chrono_now() + 86400 * 7) as usize, // 7 days
     };
     encode(&Header::default(), &claims, &EncodingKey::from_secret(state.jwt_secret.as_bytes()))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// A hash of a random password, checked against when the user doesn't exist.
+fn dummy_hash() -> &'static str {
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| hash_password(&uuid::Uuid::new_v4().to_string()).unwrap_or_default())
 }
 
 fn chrono_now() -> u64 {
@@ -68,15 +78,24 @@ pub fn decode_jwt(state: &AppState, token: &str) -> Result<Claims, StatusCode> {
         .map_err(|_| StatusCode::UNAUTHORIZED)
 }
 
-pub async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<Claims, StatusCode> {
+/// The signed-in user behind a request's JWT.
+pub async fn current_user(state: &AppState, headers: &HeaderMap) -> Result<db::User, StatusCode> {
     let token = extract_bearer(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let claims = decode_jwt(state, &token)?;
-    // Check the database too, so a revoked admin's unexpired token stops working
     let user = db::find_user_by_username(&state.db, &claims.sub).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
-    if !claims.is_admin || !user.is_admin {
+    if user.id != claims.uid {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(user)
+}
+
+pub async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<db::User, StatusCode> {
+    // The database decides, so a revoked admin's unexpired token stops working
+    let user = current_user(state, headers).await?;
+    if !user.is_admin {
         return Err(StatusCode::FORBIDDEN);
     }
-    Ok(claims)
+    Ok(user)
 }
 
 /// `sk-<username>-relay-<uuid>`; the name is cosmetic, the uuid carries all the secrecy.
@@ -97,7 +116,8 @@ fn new_api_key(username: &str) -> String {
 pub async fn create_user_internal(pool: &sqlx::SqlitePool, username: &str, email: &str, password: &str, is_admin: bool) -> Result<db::User, StatusCode> {
     // No password (LazyCat sign-in users): a random one nobody knows
     let password = if password.is_empty() { uuid::Uuid::new_v4().to_string() } else { password.to_string() };
-    let pw_hash = hash_password(&password)?;
+    // Argon2 is deliberately slow; keep it off the async workers
+    let pw_hash = tokio::task::spawn_blocking(move || hash_password(&password)).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
     let api_key = new_api_key(username);
     db::insert_user(pool, username, email, &pw_hash, &api_key, is_admin)
         .await
@@ -124,26 +144,42 @@ pub async fn register(
         return Err(StatusCode::FORBIDDEN);
     }
     let user = create_user_internal(&state.db, &req.username, email, &req.password, true).await?;
-    let token = make_jwt(&state, &user.username, user.is_admin)?;
+    let token = make_jwt(&state, &user, user.is_admin)?;
     Ok(Json(AuthResp { token, api_key: user.api_key }))
 }
 
 pub async fn login(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<AuthReq>,
 ) -> Result<Json<AuthResp>, StatusCode> {
     if state.lazycat {
         return Err(StatusCode::FORBIDDEN);
     }
+    let ip = crate::guard::client_ip(&headers);
+    if ip.as_deref().is_some_and(|ip| state.guard.blocked(ip)) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     // Try username first, then email
     let user = match db::find_user_by_username(&state.db, &req.username).await {
-        Ok(u) => u,
-        Err(_) => db::find_user_by_email(&state.db, &req.username).await.map_err(|_| StatusCode::UNAUTHORIZED)?,
+        Ok(u) => Some(u),
+        Err(_) => db::find_user_by_email(&state.db, &req.username).await.ok(),
     };
-    if !verify_password(&req.password, &user.password_hash) {
+    // Unknown users still pay for a hash, so response time doesn't reveal which names exist
+    let hash = user.as_ref().map(|u| u.password_hash.clone());
+    let password = req.password.clone();
+    let ok = tokio::task::spawn_blocking(move || match &hash {
+        Some(h) => verify_password(&password, h),
+        None => verify_password(&password, dummy_hash()),
+    }).await.unwrap_or(false);
+    let Some(user) = user.filter(|_| ok) else {
+        eprintln!("login failed for {:?} from {}", req.username, ip.as_deref().unwrap_or("unknown"));
+        if let Some(ip) = &ip {
+            state.guard.fail(ip);
+        }
         return Err(StatusCode::UNAUTHORIZED);
-    }
-    let token = make_jwt(&state, &user.username, user.is_admin)?;
+    };
+    let token = make_jwt(&state, &user, user.is_admin)?;
     Ok(Json(AuthResp { token, api_key: user.api_key }))
 }
 
@@ -175,7 +211,7 @@ pub async fn sso(
         Err(_) if is_admin => create_user_internal(&state.db, uid, "", "", true).await?,
         Err(_) => return Err(StatusCode::FORBIDDEN),
     };
-    let token = make_jwt(&state, &user.username, is_admin)?;
+    let token = make_jwt(&state, &user, is_admin)?;
     Ok(Json(AuthResp { token, api_key: user.api_key }))
 }
 
@@ -183,9 +219,7 @@ pub async fn get_api_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = extract_bearer(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    let claims = decode_jwt(&state, &token)?;
-    let user = db::find_user_by_username(&state.db, &claims.sub).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    let user = current_user(&state, &headers).await?;
     Ok(Json(serde_json::json!({ "api_key": user.api_key })))
 }
 
@@ -193,9 +227,7 @@ pub async fn refresh_api_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = extract_bearer(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    let claims = decode_jwt(&state, &token)?;
-    let user = db::find_user_by_username(&state.db, &claims.sub).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    let user = current_user(&state, &headers).await?;
     let new_key = new_api_key(&user.username);
     db::update_user_api_key(&state.db, user.id, &new_key).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "api_key": new_key })))
