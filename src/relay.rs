@@ -1,7 +1,8 @@
 use axum::{
     body::{Body, Bytes},
-    extract::{Json, Path, State},
+    extract::{Json, Path, Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::Next,
     response::Response,
 };
 use futures::StreamExt;
@@ -22,6 +23,17 @@ fn extract_api_key(headers: &HeaderMap) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Reject unauthenticated API calls before their (possibly large) body is read.
+pub async fn require_api_key(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let api_key = extract_api_key(req.headers()).ok_or(StatusCode::UNAUTHORIZED)?;
+    db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
+    Ok(next.run(req).await)
+}
+
 pub async fn list_models(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -29,132 +41,151 @@ pub async fn list_models(
     let api_key = extract_api_key(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
 
-    let models = db::list_models(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let data: Vec<Value> = models.iter().map(|m| {
-        serde_json::json!({
-            "id": m.public_name,
-            "object": "model",
-            "owned_by": "relay",
-        })
+    let providers: std::collections::HashMap<i64, String> = db::list_providers(&state.db).await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter().map(|p| (p.id, p.name)).collect();
+    let data: Vec<Value> = state.catalog.entries().into_iter().map(|e| {
+        // Keep the upstream's metadata (context length, modalities, …) under our id
+        let mut m = match e.meta {
+            Value::Object(o) => o,
+            _ => Default::default(),
+        };
+        if !m.contains_key("display_name") {
+            m.insert("display_name".into(), Value::String(e.id.clone()));
+        }
+        m.insert("id".into(), Value::String(e.id));
+        m.insert("object".into(), "model".into());
+        // Anthropic-style field, for clients that list models in that format
+        m.insert("type".into(), "model".into());
+        m.insert("owned_by".into(), providers.get(&e.provider_id).cloned().unwrap_or_default().into());
+        Value::Object(m)
     }).collect();
 
     Ok(Json(serde_json::json!({
         "object": "list",
         "data": data,
+        "has_more": false,
     })))
 }
 
-const RETRY_STATUSES: &[u16] = &[401, 403, 429, 503];
-
-async fn try_upstream(
-    client: &reqwest::Client,
-    url: &str,
-    user_agent: &str,
-    key: &str,
-    body: &str,
-    use_anthropic_auth: bool,
-) -> Result<reqwest::Response, StatusCode> {
-    let mut req = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .header("User-Agent", user_agent)
-        .header("x-app", "cli")
-        .body(body.to_string());
-
-    if use_anthropic_auth {
-        req = req
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01");
-    } else {
-        req = req.header("Authorization", format!("Bearer {key}"));
-    }
-
-    req.send().await.map_err(|_| StatusCode::BAD_GATEWAY)
+/// Agent-facing endpoints. Each is forwarded as-is to the same endpoint upstream.
+#[derive(Clone, Copy)]
+enum Endpoint {
+    ChatCompletions,
+    Responses,
+    Messages,
+    CountTokens,
 }
 
-async fn relay_with_fallback(
-    state: &AppState,
-    headers: &HeaderMap,
-    body: &str,
-    use_anthropic_auth: bool,
-) -> Result<Response, StatusCode> {
-    // Auth
+impl Endpoint {
+    fn is_anthropic(self) -> bool {
+        matches!(self, Endpoint::Messages | Endpoint::CountTokens)
+    }
+
+    fn url(self, provider: &db::Provider) -> String {
+        match self {
+            Endpoint::ChatCompletions => format!("{}/chat/completions", provider.base_url.trim_end_matches('/')),
+            Endpoint::Responses => format!("{}/responses", provider.base_url.trim_end_matches('/')),
+            Endpoint::Messages => format!("{}/v1/messages", anthropic_base(provider)),
+            Endpoint::CountTokens => format!("{}/v1/messages/count_tokens", anthropic_base(provider)),
+        }
+    }
+}
+
+/// Anthropic base URL; falls back to the OpenAI base minus its trailing /v1.
+fn anthropic_base(provider: &db::Provider) -> &str {
+    let explicit = provider.anthropic_base_url.trim_end_matches('/');
+    if !explicit.is_empty() {
+        return explicit;
+    }
+    let base = provider.base_url.trim_end_matches('/');
+    base.strip_suffix("/v1").unwrap_or(base)
+}
+
+/// Authenticate the caller and check their limit; returns the user id.
+async fn authorize(state: &AppState, headers: &HeaderMap, model_name: &str) -> Result<i64, StatusCode> {
     let api_key = extract_api_key(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let user = db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-    // Parse body
-    let mut body_json: Value = serde_json::from_str(body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let model_name = body_json["model"].as_str().ok_or(StatusCode::BAD_REQUEST)?.to_string();
-
-    // Check rate limit
-    let allowed = db::check_limit(&state.db, user.id, &model_name).await.unwrap_or(true);
+    let allowed = db::check_limit(&state.db, user.id, model_name).await.unwrap_or(true);
     if !allowed {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
+    Ok(user.id)
+}
+
+async fn provider_keys(state: &AppState, provider_id: i64) -> Vec<String> {
+    db::get_provider_keys(&state.db, provider_id).await
+        .map(|keys| keys.into_iter().map(|k| k.api_key).collect())
+        .unwrap_or_default()
+}
+
+async fn relay(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &str,
+    endpoint: Endpoint,
+) -> Result<Response, StatusCode> {
+    // Parse body
+    let mut body_json: Value = serde_json::from_str(body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let requested = body_json["model"].as_str().ok_or(StatusCode::BAD_REQUEST)?.to_string();
 
     // Resolve model
-    let resolved = db::resolve_model(&state.db, &model_name).await.map_err(|_| StatusCode::NOT_FOUND)?;
-    body_json["model"] = Value::String(resolved.upstream_model.clone());
+    let (provider, entry) = state.catalog.resolve(state, &requested).await.ok_or(StatusCode::NOT_FOUND)?;
+    // Limits and usage use the catalog id, so `ark-code-latest` and `ark/ark-code-latest` count as one model
+    let model_name = entry.id;
+    let upstream_model = entry.upstream_model;
+    let user_id = authorize(state, headers, &model_name).await?;
+    body_json["model"] = Value::String(upstream_model.clone());
 
     let is_stream = body_json.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    let anthropic_path;
-    let upstream_path = if use_anthropic_auth {
-        anthropic_path = resolved.upstream_path.replace("/chat/completions", "/messages");
-        &anthropic_path
-    } else {
-        &resolved.upstream_path
-    };
-    let url = format!("{}{}", resolved.base_url.trim_end_matches('/'), upstream_path);
+    let url = endpoint.url(&provider);
     let body_str = body_json.to_string();
 
-    // Gather keys
-    let mut keys: Vec<String> = Vec::new();
-    if let Ok(provider_keys) = db::get_provider_keys(&state.db, resolved.provider_id).await {
-        for pk in &provider_keys {
-            keys.push(pk.api_key.clone());
-        }
-    }
-    if let Some(client_key) = headers.get("x-upstream-key").and_then(|v| v.to_str().ok()) {
-        keys.push(client_key.to_string());
-    }
+    let keys = provider_keys(state, provider.id).await;
 
-    if keys.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    // Anthropic clients pick the API version and opt into beta features per request
+    let anthropic_version = headers.get("anthropic-version").and_then(|v| v.to_str().ok()).unwrap_or("2023-06-01");
+    let anthropic_beta = headers.get("anthropic-beta").and_then(|v| v.to_str().ok());
 
-    // Try each key with fallback
-    let mut last_resp = None;
-    for key in &keys {
-        let resp = try_upstream(&state.http_client, &url, &resolved.user_agent, key, &body_str, use_anthropic_auth).await?;
-        let status_code = resp.status().as_u16();
-
-        if !RETRY_STATUSES.contains(&status_code) {
-            // Log usage
-            if status_code >= 200 && status_code < 300 {
-                if is_stream {
-                    // Streaming: log request count only, can't read tokens
-                    let _ = db::log_usage(&state.db, user.id, &model_name, 0, 0).await;
-                    return stream_response(resp);
-                } else {
-                    // Non-streaming: read body, extract tokens, then return
-                    let resp_bytes = resp.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
-                    let (input_t, output_t) = extract_tokens(&resp_bytes);
-                    let _ = db::log_usage(&state.db, user.id, &model_name, input_t, output_t).await;
-                    let resp_status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK);
-                    return Ok(Response::builder()
-                        .status(resp_status)
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from(resp_bytes))
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
-                }
+    let resp = state.keys.send(keys, |key| {
+        let mut req = state.http_client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("User-Agent", &provider.user_agent)
+            .header("x-app", "cli")
+            .body(body_str.clone());
+        if endpoint.is_anthropic() {
+            req = req.header("x-api-key", key).header("anthropic-version", anthropic_version);
+            if let Some(beta) = anthropic_beta {
+                req = req.header("anthropic-beta", beta);
             }
-            return stream_response(resp);
+        } else {
+            req = req.header("Authorization", format!("Bearer {key}"));
         }
-        last_resp = Some(resp);
+        req
+    }).await?;
+
+    let status_code = resp.status().as_u16();
+    // Token counting is not usage
+    if !(200..300).contains(&status_code) || matches!(endpoint, Endpoint::CountTokens) {
+        return stream_response(resp);
     }
 
-    stream_response(last_resp.unwrap())
+    if is_stream {
+        // Streaming: log request count only, can't read tokens
+        let _ = db::log_usage(&state.db, user_id, &model_name, 0, 0).await;
+        return stream_response(resp);
+    }
+
+    // Non-streaming: read body, extract tokens, then return
+    let resp_bytes = resp.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let (input_t, output_t) = extract_tokens(&resp_bytes);
+    let _ = db::log_usage(&state.db, user_id, &model_name, input_t, output_t).await;
+    Response::builder()
+        .status(status_code)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(resp_bytes))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 pub async fn chat_completions(
@@ -162,7 +193,15 @@ pub async fn chat_completions(
     headers: HeaderMap,
     body: String,
 ) -> Result<Response, StatusCode> {
-    relay_with_fallback(&state, &headers, &body, false).await
+    relay(&state, &headers, &body, Endpoint::ChatCompletions).await
+}
+
+pub async fn responses(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, StatusCode> {
+    relay(&state, &headers, &body, Endpoint::Responses).await
 }
 
 pub async fn anthropic_messages(
@@ -170,7 +209,15 @@ pub async fn anthropic_messages(
     headers: HeaderMap,
     body: String,
 ) -> Result<Response, StatusCode> {
-    relay_with_fallback(&state, &headers, &body, true).await
+    relay(&state, &headers, &body, Endpoint::Messages).await
+}
+
+pub async fn count_tokens(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, StatusCode> {
+    relay(&state, &headers, &body, Endpoint::CountTokens).await
 }
 
 pub async fn image_generations(
@@ -178,7 +225,7 @@ pub async fn image_generations(
     headers: HeaderMap,
     body: String,
 ) -> Result<Response, StatusCode> {
-    relay_generic(&state, &headers, &body, "/v1beta/openai/images/generations").await
+    relay_generic(&state, &headers, &body, false).await
 }
 
 pub async fn video_generations(
@@ -186,7 +233,7 @@ pub async fn video_generations(
     headers: HeaderMap,
     body: String,
 ) -> Result<Response, StatusCode> {
-    relay_generic(&state, &headers, &body, "").await
+    relay_generic(&state, &headers, &body, true).await
 }
 
 /// Generic relay for non-chat endpoints (images, videos).
@@ -195,70 +242,48 @@ async fn relay_generic(
     state: &AppState,
     headers: &HeaderMap,
     body: &str,
-    override_path: &str,
+    is_video: bool,
 ) -> Result<Response, StatusCode> {
-    let api_key = extract_api_key(headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    let user = db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
-
     let mut body_json: Value = serde_json::from_str(body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let model_name = body_json["model"].as_str().ok_or(StatusCode::BAD_REQUEST)?.to_string();
+    let requested = body_json["model"].as_str().ok_or(StatusCode::BAD_REQUEST)?.to_string();
 
-    // Check rate limit
-    let allowed = db::check_limit(&state.db, user.id, &model_name).await.unwrap_or(true);
-    if !allowed {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
+    let (provider, entry) = state.catalog.resolve(state, &requested).await.ok_or(StatusCode::NOT_FOUND)?;
+    // Limits and usage use the catalog id, so `ark-code-latest` and `ark/ark-code-latest` count as one model
+    let model_name = entry.id;
+    let upstream_model = entry.upstream_model;
+    let user_id = authorize(state, headers, &model_name).await?;
+    body_json["model"] = Value::String(upstream_model.clone());
 
-    let resolved = db::resolve_model(&state.db, &model_name).await.map_err(|_| StatusCode::NOT_FOUND)?;
-    body_json["model"] = Value::String(resolved.upstream_model.clone());
-
-    let url = if override_path.is_empty() {
-        // Video: use native Google predict endpoint
-        format!("{}/v1beta/models/{}:predictLongRunning",
-            resolved.base_url.trim_end_matches('/'), resolved.upstream_model)
+    let base = provider.base_url.trim_end_matches('/');
+    let url = if is_video {
+        // Native Google API: …/v1beta/openai → …/v1beta/models/{model}:predictLongRunning
+        let native = base.strip_suffix("/openai").unwrap_or(base);
+        format!("{native}/models/{upstream_model}:predictLongRunning")
     } else {
-        format!("{}{}", resolved.base_url.trim_end_matches('/'), override_path)
+        format!("{base}/images/generations")
     };
 
     let body_str = body_json.to_string();
+    let keys = provider_keys(state, provider.id).await;
 
-    let mut keys: Vec<String> = Vec::new();
-    if let Ok(provider_keys) = db::get_provider_keys(&state.db, resolved.provider_id).await {
-        for pk in &provider_keys {
-            keys.push(pk.api_key.clone());
-        }
-    }
-    if keys.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    let mut last_resp = None;
-    for key in &keys {
-        let mut req = state.http_client
+    let resp = state.keys.send(keys, |key| {
+        let req = state.http_client
             .post(&url)
             .header("Content-Type", "application/json")
-            .header("User-Agent", &resolved.user_agent)
+            .header("User-Agent", &provider.user_agent)
             .body(body_str.clone());
-
-        if override_path.is_empty() {
+        if is_video {
             // Native Google API uses x-goog-api-key
-            req = req.header("x-goog-api-key", key.as_str());
+            req.header("x-goog-api-key", key)
         } else {
-            req = req.header("Authorization", format!("Bearer {key}"));
+            req.header("Authorization", format!("Bearer {key}"))
         }
+    }).await?;
 
-        let resp = req.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
-        let status_code = resp.status().as_u16();
-        if !RETRY_STATUSES.contains(&status_code) {
-            if status_code >= 200 && status_code < 300 {
-                let _ = db::log_usage(&state.db, user.id, &model_name, 0, 0).await;
-            }
-            return stream_response(resp);
-        }
-        last_resp = Some(resp);
+    if resp.status().is_success() {
+        let _ = db::log_usage(&state.db, user_id, &model_name, 0, 0).await;
     }
-
-    stream_response(last_resp.unwrap())
+    stream_response(resp)
 }
 
 fn extract_tokens(body: &[u8]) -> (i64, i64) {
@@ -304,37 +329,28 @@ async fn file_proxy(
     let api_key = extract_api_key(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
 
-    let provider_keys = db::get_provider_keys(&state.db, 1).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if provider_keys.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
+    let keys = provider_keys(state, 1).await;
     let url = format!("https://api.moonshot.cn/{}", path.trim_start_matches('/'));
-
     let content_type = headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream");
 
-    let mut last_resp = None;
-    for pk in &provider_keys {
+    let resp = state.keys.send(keys, |key| {
         let req = match method {
+            "GET" => state.http_client.get(&url),
             "DELETE" => state.http_client.delete(&url),
             _ => state.http_client.post(&url),
         };
-        let resp = req
-            .header("Content-Type", content_type)
-            .header("Authorization", format!("Bearer {}", pk.api_key))
+        req.header("Content-Type", content_type)
+            .header("Authorization", format!("Bearer {key}"))
             .body(body.clone())
-            .send()
-            .await
-            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    }).await?;
 
-        let status_code = resp.status().as_u16();
-        if !RETRY_STATUSES.contains(&status_code) {
-            return stream_response(resp);
-        }
-        last_resp = Some(resp);
-    }
+    stream_response(resp)
+}
 
-    stream_response(last_resp.unwrap())
+/// File ids go into the upstream URL; anything but a plain id could reach other upstream endpoints.
+fn check_file_id(file_id: &str) -> Result<(), StatusCode> {
+    let ok = !file_id.is_empty() && file_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if ok { Ok(()) } else { Err(StatusCode::BAD_REQUEST) }
 }
 
 pub async fn files_upload(
@@ -358,6 +374,7 @@ pub async fn files_action(
     Path(file_id): Path<String>,
     body: Bytes,
 ) -> Result<Response, StatusCode> {
+    check_file_id(&file_id)?;
     file_proxy(&state, &headers, &format!("/v1/files/{file_id}"), "GET", body).await
 }
 
@@ -366,6 +383,7 @@ pub async fn files_content(
     headers: HeaderMap,
     Path(file_id): Path<String>,
 ) -> Result<Response, StatusCode> {
+    check_file_id(&file_id)?;
     file_proxy(&state, &headers, &format!("/v1/files/{file_id}/content"), "GET", Bytes::new()).await
 }
 
@@ -374,5 +392,6 @@ pub async fn files_delete(
     headers: HeaderMap,
     Path(file_id): Path<String>,
 ) -> Result<Response, StatusCode> {
+    check_file_id(&file_id)?;
     file_proxy(&state, &headers, &format!("/v1/files/{file_id}"), "DELETE", Bytes::new()).await
 }

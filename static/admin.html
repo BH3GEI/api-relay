@@ -75,12 +75,13 @@ th { color: #888; font-weight: 600; }
     <h2>Providers</h2>
     <div style="margin-bottom:12px">
       <input id="p-name" placeholder="Name" style="width:100px">
-      <input id="p-url" placeholder="Base URL" style="width:200px">
+      <input id="p-url" placeholder="OpenAI Base URL (…/v1)" style="width:200px">
+      <input id="p-aurl" placeholder="Anthropic Base URL (optional)" style="width:200px">
       <input id="p-ua" placeholder="User-Agent" style="width:160px">
-      <input id="p-key" placeholder="API Key (optional)" style="width:180px">
+      <input id="p-models" placeholder="Extra models, comma-separated (optional)" style="width:240px">
       <button onclick="createProvider()">Add</button>
     </div>
-    <table><thead><tr><th>ID</th><th>Name</th><th>Base URL</th><th>User-Agent</th><th>Enabled</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>
+    <table><thead><tr><th>ID</th><th>Name</th><th>Base URL</th><th>Anthropic Base URL</th><th>Extra Models</th><th>User-Agent</th><th>Enabled</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>
 
     <div id="keys-section" class="hidden" style="margin-top:16px;padding-top:16px;border-top:1px solid #333">
       <h2 id="keys-title">Keys</h2>
@@ -96,15 +97,10 @@ th { color: #888; font-weight: 600; }
 
   <!-- Models -->
   <div id="tab-models" class="card hidden">
-    <h2>Model Mappings</h2>
-    <div style="margin-bottom:12px">
-      <input id="m-name" placeholder="Public Name" style="width:140px">
-      <select id="m-provider"></select>
-      <input id="m-upstream" placeholder="Upstream Model" style="width:160px">
-      <input id="m-path" placeholder="Path" value="/v1/chat/completions" style="width:180px">
-      <button onclick="createModel()">Add</button>
-    </div>
-    <table><thead><tr><th>ID</th><th>Public Name</th><th>Provider</th><th>Upstream Model</th><th>Path</th><th></th></tr></thead><tbody id="models-body"></tbody></table>
+    <h2>Models</h2>
+    <p style="color:#888;font-size:13px">Synced from each provider every 10 minutes, and right after providers or keys change. Clients use these ids as-is; a bare upstream id works too when only one provider has it.</p>
+    <div style="margin-bottom:12px"><button onclick="refreshModels()">Refresh now</button></div>
+    <table><thead><tr><th>Model</th></tr></thead><tbody id="models-body"></tbody></table>
   </div>
 
   <!-- Usage -->
@@ -118,7 +114,7 @@ th { color: #888; font-weight: 600; }
     <h2>Usage Limits</h2>
     <div style="margin-bottom:12px">
       <select id="lim-user"></select>
-      <input id="lim-model" placeholder="Model (* = all)" value="*" style="width:140px">
+      <input id="lim-model" placeholder="Model id, e.g. kimi/k3 (* = all)" value="*" style="width:200px">
       <input id="lim-req" placeholder="Max req/day (-1=∞)" value="-1" style="width:130px" type="number">
       <input id="lim-tok" placeholder="Max tok/day (-1=∞)" value="-1" style="width:130px" type="number">
       <button onclick="createLimit()">Set Limit</button>
@@ -135,7 +131,11 @@ const BASE = location.origin;
 let token = localStorage.getItem('admin_token');
 let providers = [];
 
-if (token) loadAdmin();
+// On LazyCat, sign in as the current LazyCat user; elsewhere fall back to the password form
+fetch(BASE + '/auth/sso').then(r => r.ok ? r.json() : null).then(res => {
+  if (res) { token = res.token; localStorage.setItem('admin_token', token); }
+  if (token) loadAdmin();
+}).catch(() => { if (token) loadAdmin(); });
 
 function showMsg(id, msg, ok) {
   const el = document.getElementById(id);
@@ -218,24 +218,21 @@ async function loadProviders() {
   providers = await api('/admin/providers');
   const tb = document.getElementById('providers-body');
   tb.innerHTML = providers.map(p => `<tr>
-    <td>${p.id}</td><td>${p.name}</td><td>${p.base_url}</td><td>${p.user_agent}</td>
+    <td>${p.id}</td><td>${p.name}</td><td>${p.base_url}</td><td>${p.anthropic_base_url || '-'}</td><td>${p.models || '-'}</td><td>${p.user_agent}</td>
     <td>${p.enabled ? 'Yes' : 'No'}</td>
     <td>
       <button class="btn-sm secondary" onclick="showKeys(${p.id},'${p.name}')">Keys</button>
       <button class="btn-danger btn-sm" onclick="deleteProvider(${p.id})">Delete</button>
     </td>
   </tr>`).join('');
-  // Update model provider select
-  const sel = document.getElementById('m-provider');
-  sel.innerHTML = providers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
 }
 async function createProvider() {
-  const key = document.getElementById('p-key').value;
   await api('/admin/providers', { method:'POST', body: JSON.stringify({
     name: document.getElementById('p-name').value,
     base_url: document.getElementById('p-url').value,
+    anthropic_base_url: document.getElementById('p-aurl').value,
     user_agent: document.getElementById('p-ua').value,
-    api_key: key || null,
+    models: document.getElementById('p-models').value,
     enabled: true
   })});
   loadProviders();
@@ -247,31 +244,12 @@ async function deleteProvider(id) {
 }
 
 // Models
-async function loadModels() {
-  const models = await api('/admin/models');
-  const tb = document.getElementById('models-body');
-  tb.innerHTML = models.map(m => {
-    const pname = providers.find(p => p.id === m.provider_id)?.name || m.provider_id;
-    return `<tr>
-      <td>${m.id}</td><td>${m.public_name}</td><td>${pname}</td><td>${m.upstream_model}</td><td>${m.upstream_path}</td>
-      <td><button class="btn-danger btn-sm" onclick="deleteModel(${m.id})">Delete</button></td>
-    </tr>`;
-  }).join('');
+function renderModels(ids) {
+  document.getElementById('models-body').innerHTML = ids.map(id => `<tr><td><code>${id}</code></td></tr>`).join('')
+    || '<tr><td style="color:#666">No models yet. Add a provider and a key.</td></tr>';
 }
-async function createModel() {
-  await api('/admin/models', { method:'POST', body: JSON.stringify({
-    public_name: document.getElementById('m-name').value,
-    provider_id: parseInt(document.getElementById('m-provider').value),
-    upstream_model: document.getElementById('m-upstream').value,
-    upstream_path: document.getElementById('m-path').value
-  })});
-  loadModels();
-}
-async function deleteModel(id) {
-  if (!confirm('Delete model?')) return;
-  await api('/admin/models/'+id, { method:'DELETE' });
-  loadModels();
-}
+async function loadModels() { renderModels(await api('/admin/catalog')); }
+async function refreshModels() { renderModels(await api('/admin/catalog/refresh', { method:'POST' })); }
 
 // Usage
 async function loadUsage() {
@@ -294,12 +272,17 @@ async function loadLimits() {
     return `<tr><td>${l.id}</td><td>${uname}</td><td>${l.model}</td><td>${l.max_requests_daily < 0 ? '∞' : l.max_requests_daily}</td><td>${l.max_tokens_daily < 0 ? '∞' : l.max_tokens_daily}</td><td><button class="btn-danger btn-sm" onclick="deleteLimit(${l.id})">Delete</button></td></tr>`;
   }).join('') || '<tr><td colspan="6" style="color:#666">No limits set</td></tr>';
 }
+// Empty means unlimited (-1); 0 is a real limit that blocks the model
+function limitValue(id) {
+  const v = parseInt(document.getElementById(id).value, 10);
+  return Number.isNaN(v) ? -1 : v;
+}
 async function createLimit() {
   await api('/admin/limits', { method:'POST', body: JSON.stringify({
     user_id: parseInt(document.getElementById('lim-user').value),
     model: document.getElementById('lim-model').value || '*',
-    max_requests_daily: parseInt(document.getElementById('lim-req').value) || -1,
-    max_tokens_daily: parseInt(document.getElementById('lim-tok').value) || -1
+    max_requests_daily: limitValue('lim-req'),
+    max_tokens_daily: limitValue('lim-tok')
   })});
   loadLimits();
 }
@@ -325,7 +308,7 @@ async function showKeys(pid, pname) {
   </tr>`).join('');
 }
 async function createKey() {
-  await api(`/admin/providers/${currentProviderId}/keys`, { method:'POST', body: JSON.stringify({
+  await api(`/admin/keys/${currentProviderId}`, { method:'POST', body: JSON.stringify({
     api_key: document.getElementById('k-key').value,
     label: document.getElementById('k-label').value || null,
     priority: parseInt(document.getElementById('k-priority').value) || 0

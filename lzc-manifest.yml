@@ -1,0 +1,10 @@
+application:
+  subdomain: relay
+  upstreams:
+    - location: /
+      backend: http://127.0.0.1:3000/
+      backend_launch_command: /bin/sh /lzcapp/pkg/content/start.sh
+  # API clients can't do LazyCat's browser sign-in; the relay checks their key itself.
+  # Everything else (pages, admin, /auth) stays behind LazyCat sign-in.
+  public_path:
+    - /v1/

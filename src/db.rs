@@ -21,15 +21,9 @@ pub struct Provider {
     pub user_agent: String,
     pub api_key: Option<String>,
     pub enabled: bool,
-}
-
-#[derive(Serialize, sqlx::FromRow)]
-pub struct Model {
-    pub id: i64,
-    pub public_name: String,
-    pub provider_id: i64,
-    pub upstream_model: String,
-    pub upstream_path: String,
+    pub anthropic_base_url: String,
+    /// Model ids to offer in addition to what the upstream lists (some upstreams have no /models)
+    pub models: String,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -40,15 +34,6 @@ pub struct ProviderKey {
     pub label: String,
     pub enabled: bool,
     pub priority: i64,
-}
-
-#[derive(sqlx::FromRow)]
-pub struct ModelWithProvider {
-    pub upstream_model: String,
-    pub upstream_path: String,
-    pub base_url: String,
-    pub user_agent: String,
-    pub provider_id: i64,
 }
 
 pub async fn migrate(pool: &SqlitePool) {
@@ -77,6 +62,11 @@ pub async fn migrate(pool: &SqlitePool) {
             enabled BOOLEAN DEFAULT TRUE
         )"
     ).execute(pool).await.unwrap();
+    // Migration: base_url is the OpenAI-style base (…/v1); Anthropic endpoints often live elsewhere
+    let _ = sqlx::query("ALTER TABLE providers ADD COLUMN anthropic_base_url TEXT NOT NULL DEFAULT ''")
+        .execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE providers ADD COLUMN models TEXT NOT NULL DEFAULT ''")
+        .execute(pool).await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS provider_keys (
@@ -114,14 +104,24 @@ pub async fn migrate(pool: &SqlitePool) {
     ).execute(pool).await.unwrap();
 
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS models (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            public_name TEXT UNIQUE NOT NULL,
-            provider_id INTEGER NOT NULL REFERENCES providers(id),
-            upstream_model TEXT NOT NULL,
-            upstream_path TEXT NOT NULL DEFAULT '/v1/chat/completions'
+        "CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         )"
     ).execute(pool).await.unwrap();
+
+}
+
+// ── Settings ──
+
+/// The JWT signing secret, generated on first start so admin logins survive restarts.
+pub async fn jwt_secret(pool: &SqlitePool) -> Result<String, sqlx::Error> {
+    sqlx::query("INSERT OR IGNORE INTO settings (key, value) VALUES ('jwt_secret', ?)")
+        .bind(format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple()))
+        .execute(pool).await?;
+    let row: (String,) = sqlx::query_as("SELECT value FROM settings WHERE key = 'jwt_secret'")
+        .fetch_one(pool).await?;
+    Ok(row.0)
 }
 
 // ── Users ──
@@ -153,6 +153,11 @@ pub async fn update_user_api_key(pool: &SqlitePool, user_id: i64, new_key: &str)
     Ok(())
 }
 
+pub async fn set_user_admin(pool: &SqlitePool, user_id: i64, is_admin: bool) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE users SET is_admin = ? WHERE id = ?").bind(is_admin).bind(user_id).execute(pool).await?;
+    Ok(())
+}
+
 pub async fn delete_user(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM users WHERE id = ?").bind(id).execute(pool).await?;
     Ok(())
@@ -169,52 +174,39 @@ pub async fn list_providers(pool: &SqlitePool) -> Result<Vec<Provider>, sqlx::Er
     sqlx::query_as("SELECT * FROM providers ORDER BY id").fetch_all(pool).await
 }
 
-pub async fn create_provider(pool: &SqlitePool, name: &str, base_url: &str, user_agent: &str, api_key: Option<&str>, enabled: bool) -> Result<Provider, sqlx::Error> {
-    sqlx::query_as(
-        "INSERT INTO providers (name, base_url, user_agent, api_key, enabled) VALUES (?, ?, ?, ?, ?) RETURNING *"
-    ).bind(name).bind(base_url).bind(user_agent).bind(api_key).bind(enabled).fetch_one(pool).await
+pub struct ProviderInput<'a> {
+    pub name: &'a str,
+    pub base_url: &'a str,
+    pub anthropic_base_url: &'a str,
+    pub user_agent: &'a str,
+    pub api_key: Option<&'a str>,
+    pub models: &'a str,
+    pub enabled: bool,
 }
 
-pub async fn update_provider(pool: &SqlitePool, id: i64, name: &str, base_url: &str, user_agent: &str, api_key: Option<&str>, enabled: bool) -> Result<Provider, sqlx::Error> {
+pub async fn create_provider(pool: &SqlitePool, p: &ProviderInput<'_>) -> Result<Provider, sqlx::Error> {
     sqlx::query_as(
-        "UPDATE providers SET name=?, base_url=?, user_agent=?, api_key=?, enabled=? WHERE id=? RETURNING *"
-    ).bind(name).bind(base_url).bind(user_agent).bind(api_key).bind(enabled).bind(id).fetch_one(pool).await
+        "INSERT INTO providers (name, base_url, anthropic_base_url, user_agent, api_key, models, enabled) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *"
+    ).bind(p.name).bind(p.base_url).bind(p.anthropic_base_url).bind(p.user_agent).bind(p.api_key).bind(p.models).bind(p.enabled).fetch_one(pool).await
+}
+
+pub async fn update_provider(pool: &SqlitePool, id: i64, p: &ProviderInput<'_>) -> Result<Provider, sqlx::Error> {
+    sqlx::query_as(
+        "UPDATE providers SET name=?, base_url=?, anthropic_base_url=?, user_agent=?, api_key=?, models=?, enabled=? WHERE id=? RETURNING *"
+    ).bind(p.name).bind(p.base_url).bind(p.anthropic_base_url).bind(p.user_agent).bind(p.api_key).bind(p.models).bind(p.enabled).bind(id).fetch_one(pool).await
+}
+
+pub async fn get_enabled_provider(pool: &SqlitePool, id: i64) -> Result<Provider, sqlx::Error> {
+    sqlx::query_as("SELECT * FROM providers WHERE id = ? AND enabled = TRUE").bind(id).fetch_one(pool).await
+}
+
+pub async fn list_enabled_providers(pool: &SqlitePool) -> Result<Vec<Provider>, sqlx::Error> {
+    sqlx::query_as("SELECT * FROM providers WHERE enabled = TRUE ORDER BY id").fetch_all(pool).await
 }
 
 pub async fn delete_provider(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM providers WHERE id = ?").bind(id).execute(pool).await?;
     Ok(())
-}
-
-// ── Models ──
-
-pub async fn list_models(pool: &SqlitePool) -> Result<Vec<Model>, sqlx::Error> {
-    sqlx::query_as("SELECT * FROM models ORDER BY id").fetch_all(pool).await
-}
-
-pub async fn create_model(pool: &SqlitePool, public_name: &str, provider_id: i64, upstream_model: &str, upstream_path: &str) -> Result<Model, sqlx::Error> {
-    sqlx::query_as(
-        "INSERT INTO models (public_name, provider_id, upstream_model, upstream_path) VALUES (?, ?, ?, ?) RETURNING *"
-    ).bind(public_name).bind(provider_id).bind(upstream_model).bind(upstream_path).fetch_one(pool).await
-}
-
-pub async fn update_model(pool: &SqlitePool, id: i64, public_name: &str, provider_id: i64, upstream_model: &str, upstream_path: &str) -> Result<Model, sqlx::Error> {
-    sqlx::query_as(
-        "UPDATE models SET public_name=?, provider_id=?, upstream_model=?, upstream_path=? WHERE id=? RETURNING *"
-    ).bind(public_name).bind(provider_id).bind(upstream_model).bind(upstream_path).bind(id).fetch_one(pool).await
-}
-
-pub async fn delete_model(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM models WHERE id = ?").bind(id).execute(pool).await?;
-    Ok(())
-}
-
-pub async fn resolve_model(pool: &SqlitePool, public_name: &str) -> Result<ModelWithProvider, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT m.upstream_model, m.upstream_path, p.base_url, p.user_agent, p.id as provider_id
-         FROM models m JOIN providers p ON m.provider_id = p.id
-         WHERE m.public_name = ? AND p.enabled = TRUE"
-    ).bind(public_name).fetch_one(pool).await
 }
 
 pub async fn get_provider_keys(pool: &SqlitePool, provider_id: i64) -> Result<Vec<ProviderKey>, sqlx::Error> {
@@ -294,7 +286,8 @@ pub async fn check_limit(pool: &SqlitePool, user_id: i64, model: &str) -> Result
             return Ok(false);
         }
     }
-    if limits.is_empty() { Ok(false) } else { Ok(true) }
+    // No limits configured means unlimited
+    Ok(true)
 }
 
 #[derive(Serialize, sqlx::FromRow)]

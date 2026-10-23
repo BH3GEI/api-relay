@@ -1,0 +1,21 @@
+package: bh3gei.lzcapp.api-relay
+version: 0.2.2
+name: API Relay
+description: >-
+  One endpoint and one key for all your AI coding plans. Pools upstream keys with automatic
+  failover, keeps the model list in sync with each provider, and serves the APIs coding agents
+  use: Anthropic Messages, OpenAI Chat Completions and Responses.
+author: yao
+homepage: https://github.com/BH3GEI/api-relay
+locales:
+  zh:
+    name: API 中转
+    description: >-
+      一个地址、一把 key，统一使用你所有的 AI 编程套餐。多把上游 key 自动故障切换，模型列表与各家上游实时同步，
+      支持编程 agent 需要的接口：Anthropic Messages、OpenAI Chat Completions 与 Responses。
+  en:
+    name: API Relay
+    description: >-
+      One endpoint and one key for all your AI coding plans. Pools upstream keys with automatic
+      failover, keeps the model list in sync with each provider, and serves the APIs coding agents
+      use: Anthropic Messages, OpenAI Chat Completions and Responses.

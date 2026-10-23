@@ -1,0 +1,5 @@
+buildscript: sh lazycat/build.sh
+manifest: ./lzc-manifest.yml
+contentdir: ./lazycat/content
+pkgout: ./
+icon: ./lazycat/icon.png

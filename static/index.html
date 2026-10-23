@@ -49,7 +49,10 @@ a:hover { text-decoration: underline; }
 </head>
 <body>
 <div class="container">
-<h1>API Relay</h1>
+<div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+  <h1>API Relay</h1>
+  <a id="admin-link" href="/admin" class="hidden"><button class="secondary">管理后台</button></a>
+</div>
 <p class="subtitle">多标准兼容的 API 中转服务</p>
 
 <!-- Auth section -->
@@ -106,14 +109,14 @@ a:hover { text-decoration: underline; }
         <div class="info-box" style="margin-bottom:12px">
           <strong>Base URL 怎么填？</strong><br>
           不同工具对 Base URL 的要求不同，以下三种写法都可以，按工具要求选：<br>
-          &bull; <code>https://api.mofa.ai</code> — 大多数工具（Cursor、ChatBox 等）<br>
-          &bull; <code>https://api.mofa.ai/v1</code> — OpenAI SDK、部分工具要求带 /v1<br>
-          &bull; <code>https://api.mofa.ai/v1/chat/completions</code> — 少数需要完整端点的工具<br>
+          &bull; <code><span class="base-url"></span></code> — 大多数工具（Cursor、ChatBox 等）<br>
+          &bull; <code><span class="base-url"></span>/v1</code> — OpenAI SDK、部分工具要求带 /v1<br>
+          &bull; <code><span class="base-url"></span>/v1/chat/completions</code> — 少数需要完整端点的工具<br>
           如果不确定，先试第一种。
         </div>
 
         <h3>Cursor / Windsurf</h3>
-        <p>Settings &rarr; Models &rarr; OpenAI API Key，填入 API Key，Base URL 填 <code>https://api.mofa.ai/v1</code>。</p>
+        <p>Settings &rarr; Models &rarr; OpenAI API Key，填入 API Key，Base URL 填 <code><span class="base-url"></span>/v1</code>。</p>
 
         <h3>Claude Code</h3>
         <p>设置环境变量即可：</p>
@@ -197,7 +200,9 @@ a:hover { text-decoration: underline; }
     <h3>支持哪些 API 格式？</h3>
     <p>支持以下端点：</p>
     <p>&bull; <code>/v1/chat/completions</code> — 文本对话（OpenAI 格式，支持 Kimi / Claude / Gemini）</p>
-    <p>&bull; <code>/v1/messages</code> — 文本对话（Anthropic 格式，支持 Claude）</p>
+    <p>&bull; <code>/v1/responses</code> — 文本对话（OpenAI Responses 格式，Codex 用）</p>
+    <p>&bull; <code>/v1/messages</code> — 文本对话（Anthropic 格式，Claude Code 用）</p>
+    <p>&bull; <code>/v1/messages/count_tokens</code> — 计算 token 数（Anthropic 格式）</p>
     <p>&bull; <code>/v1/files</code> — 文件上传（用于图片/视频理解，支持 Kimi）</p>
     <p>&bull; <code>/v1/images/generations</code> — 图片生成（支持 Imagen 4.0）</p>
     <p>&bull; <code>/v1/videos/generations</code> — 视频生成（支持 Veo 2.0 / 3.0）</p>
@@ -212,7 +217,7 @@ a:hover { text-decoration: underline; }
     <p>你的 Key 只用于本服务的身份验证，不会被发送到任何上游服务商。请妥善保管，不要分享给他人。</p>
 
     <h3>遇到问题？</h3>
-    <p>请联系李尧。</p>
+    <p>请联系本服务的管理员。</p>
   </div>
 
   <div style="margin-top:16px;display:flex;gap:8px">
@@ -224,10 +229,15 @@ a:hover { text-decoration: underline; }
 
 <script>
 const BASE = location.origin;
+document.querySelectorAll('.base-url').forEach(el => el.textContent = BASE);
 let token = localStorage.getItem('token');
 let apiKey = '';
 
-if (token) loadDashboard();
+// On LazyCat, sign in as the current LazyCat user; elsewhere fall back to the password form
+fetch(BASE + '/auth/sso').then(r => r.ok ? r.json() : null).then(res => {
+  if (res) { token = res.token; localStorage.setItem('token', token); }
+  if (token) loadDashboard();
+}).catch(() => { if (token) loadDashboard(); });
 
 function showMsg(id, msg, ok) {
   const el = document.getElementById(id);
@@ -281,7 +291,16 @@ async function register() {
   } catch (e) { showMsg('auth-msg', 'Register failed: ' + e.message, false); }
 }
 
+// The JWT payload says whether this user is an admin; only admins get the admin entry
+function isAdmin() {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(b64)).is_admin === true;
+  } catch { return false; }
+}
+
 async function loadDashboard() {
+  document.getElementById('admin-link').classList.toggle('hidden', !isAdmin());
   document.getElementById('auth-section').classList.add('hidden');
   document.getElementById('dashboard').classList.remove('hidden');
   try {
