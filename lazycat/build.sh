@@ -23,4 +23,6 @@ rm -rf lazycat/content
 mkdir -p lazycat/content
 cp target/x86_64-unknown-linux-musl/release/api-relay lazycat/start.sh lazycat/content/
 cp "$CLOUDFLARED" lazycat/content/cloudflared
+# cloudflared is Apache-2.0; its license travels with the binary
+cp lazycat/cloudflared.LICENSE LICENSE lazycat/content/
 chmod +x lazycat/content/api-relay lazycat/content/cloudflared lazycat/content/start.sh

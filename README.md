@@ -6,6 +6,8 @@
 
 Rust 单二进制 + SQLite，可以独立运行，也可以打包成懒猫微服应用。
 
+![首页](lazycat/screenshots/home.png)
+
 ## 功能
 
 - **编程 agent 需要的接口都支持**，原样转发给上游，流式输出和工具调用不受影响：
@@ -176,3 +178,7 @@ DATABASE_URL="sqlite:relay.db?mode=rwc" BIND_ADDR=127.0.0.1:3000 ./target/releas
 - 文件接口校验 file id，防止路径穿越到上游的其他接口。
 - 日志里的 key 只显示最后 4 位。
 - relay key 泄露时，在首页点 Regenerate Key 换一把新的，旧 key 立即失效。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。懒猫包里附带的 cloudflared 使用 Apache-2.0 许可，见 [lazycat/cloudflared.LICENSE](lazycat/cloudflared.LICENSE)。
