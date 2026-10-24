@@ -468,7 +468,7 @@ async function deleteKey(id) {
 }
 
 // Public access
-const TUNNEL_STATES = { off: ['Off', '#888'], starting: ['Connecting…', '#fbbf24'], connected: ['Connected', '#4ade80'], stopped: ['Stopped (retrying)', '#f87171'] };
+const TUNNEL_STATES = { off: ['Off', '#888'], starting: ['Connecting…', '#fbbf24'], connected: ['Connected', '#4ade80'], reconnecting: ['Reconnecting…', '#fbbf24'], stopped: ['Stopped (retrying)', '#f87171'] };
 let tunnelTimer = null;
 async function loadTunnel() {
   const st = await api('/admin/tunnel');
