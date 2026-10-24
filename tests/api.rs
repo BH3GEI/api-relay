@@ -33,7 +33,7 @@ async fn pages_reference_their_scripts_by_content_hash() {
     let r = Relay::start().await;
     for (side_page, admin) in [("/", false), ("/admin", true)] {
         let page = if admin { r.lan("GET", side_page, &[], None).await } else { r.public("GET", side_page, &[], None).await };
-        let start = page.text.find("/usage-chart.js?v=").unwrap_or_else(|| panic!("{side_page} has no hashed script URL"));
+        let start = page.text.find("/static/usage-chart.js?v=").unwrap_or_else(|| panic!("{side_page} has no hashed script URL"));
         let url: String = page.text[start..].chars().take_while(|c| *c != '"').collect();
         let js = r.lan("GET", &url, &[], None).await;
         assert_eq!(js.status, StatusCode::OK);

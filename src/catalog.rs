@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
-use crate::{AppState, db};
+use crate::{AppState, db::{self, providers::Provider}};
 
 const REFRESH_EVERY: Duration = Duration::from_secs(600);
 // A request for an unknown model refreshes the catalog, but not more often than this
@@ -41,6 +41,14 @@ impl Catalog {
         self.entries.read().unwrap().clone()
     }
 
+    pub fn ids(&self) -> Vec<String> {
+        self.entries.read().unwrap().iter().map(|e| e.id.clone()).collect()
+    }
+
+    pub fn has(&self, id: &str) -> bool {
+        self.entries.read().unwrap().iter().any(|e| e.id == id)
+    }
+
     fn find(&self, name: &str) -> Option<Entry> {
         let entries = self.entries.read().unwrap();
         if let Some(e) = entries.iter().find(|e| e.id == name) {
@@ -55,7 +63,7 @@ impl Catalog {
     }
 
     /// The catalog entry and its provider for a requested model name.
-    pub async fn resolve(&self, state: &AppState, name: &str) -> Option<(db::Provider, Entry)> {
+    pub async fn resolve(&self, state: &AppState, name: &str) -> Option<(Provider, Entry)> {
         let entry = match self.find(name) {
             Some(e) => e,
             None => {
@@ -72,12 +80,12 @@ impl Catalog {
             }
         };
         // Read the provider fresh so admin edits apply to the very next request
-        let provider = db::get_enabled_provider(&state.db, entry.provider_id).await.ok()?;
+        let provider = db::providers::get_enabled(&state.db, entry.provider_id).await.ok()??;
         Some((provider, entry))
     }
 
     fn stale(&self) -> bool {
-        self.refreshed_at.read().unwrap().map_or(true, |t| t.elapsed() > MISS_REFRESH_AFTER)
+        self.refreshed_at.read().unwrap().is_none_or(|t| t.elapsed() > MISS_REFRESH_AFTER)
     }
 
     /// Rebuild the catalog from every enabled provider's model list.
@@ -88,7 +96,7 @@ impl Catalog {
     }
 
     async fn rebuild(&self, state: &AppState) {
-        let Ok(providers) = db::list_enabled_providers(&state.db).await else { return };
+        let Ok(providers) = db::providers::list_enabled(&state.db).await else { return };
 
         let previous: HashMap<i64, Vec<Entry>> = self.entries().into_iter().fold(HashMap::new(), |mut m, e| {
             m.entry(e.provider_id).or_default().push(e);
@@ -122,9 +130,8 @@ impl Catalog {
 }
 
 /// `GET {base_url}/models` from the upstream, as (id, metadata) pairs.
-async fn fetch_models(state: &AppState, p: &db::Provider) -> Option<Vec<(String, Value)>> {
-    let keys: Vec<String> = db::get_provider_keys(&state.db, p.id).await.ok()?
-        .into_iter().map(|k| k.api_key).collect();
+async fn fetch_models(state: &AppState, p: &Provider) -> Option<Vec<(String, Value)>> {
+    let keys = db::providers::usable_keys(&state.db, p.id).await.ok()?;
     let url = format!("{}/models", p.base_url.trim_end_matches('/'));
 
     let resp = state.keys.send(keys, |key| {

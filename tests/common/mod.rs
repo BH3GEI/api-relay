@@ -1,5 +1,8 @@
 //! A relay wired to a fake upstream, driven through its routers without opening a port for it.
 
+// Each test file uses its own part of this
+#![allow(dead_code)]
+
 use api_relay::{App, config::Config};
 use axum::{
     Router,

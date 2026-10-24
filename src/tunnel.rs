@@ -13,7 +13,6 @@ use tokio::sync::Notify;
 
 use crate::{AppState, db};
 
-const TOKEN_SETTING: &str = "cloudflare_tunnel_token";
 const LOG_LINES: usize = 30;
 
 // The watchdog: cloudflared can end up with no edge connection and stay that way, so it is
@@ -69,7 +68,7 @@ impl Tunnel {
     }
 
     pub async fn set_token(&self, state: &AppState, token: &str) -> Result<(), sqlx::Error> {
-        db::set_setting(&state.db, TOKEN_SETTING, token.trim()).await?;
+        db::settings::set(&state.db, db::settings::TUNNEL_TOKEN, token.trim()).await?;
         self.changed.notify_one();
         Ok(())
     }
@@ -144,7 +143,7 @@ pub fn spawn(state: Arc<AppState>) {
     let Some(binary) = state.tunnel.binary.clone() else { return };
     tokio::spawn(async move {
         loop {
-            let token = db::get_setting(&state.db, TOKEN_SETTING).await.ok().flatten().unwrap_or_default();
+            let token = db::settings::get(&state.db, db::settings::TUNNEL_TOKEN).await.ok().flatten().unwrap_or_default();
             state.tunnel.status.lock().unwrap().configured = !token.is_empty();
             if token.is_empty() {
                 state.tunnel.set_state("off");

@@ -42,7 +42,7 @@ impl KeyPool {
         let now = Instant::now();
         let cooldowns = self.cooldowns.lock().unwrap();
         let (ready, cooling): (Vec<String>, Vec<String>) = keys.into_iter()
-            .partition(|k| cooldowns.get(k).map_or(true, |until| *until <= now));
+            .partition(|k| cooldowns.get(k).is_none_or(|until| *until <= now));
         ready.into_iter().chain(cooling).collect()
     }
 
@@ -101,8 +101,8 @@ impl KeyPool {
     }
 }
 
-// Last few characters of a key, enough to tell keys apart in logs
-fn tail(key: &str) -> &str {
+/// The last few characters of a key, enough to tell keys apart in logs and on the admin page.
+pub fn tail(key: &str) -> &str {
     key.char_indices().rev().nth(3).map_or(key, |(i, _)| &key[i..])
 }
 
@@ -114,7 +114,7 @@ fn cooldown_for(resp: &reqwest::Response) -> Duration {
                 .and_then(|s| s.parse::<u64>().ok());
             Duration::from_secs(retry_after.unwrap_or(60).clamp(1, 600))
         }
-        401 | 402 | 403 => Duration::from_secs(600),
+        401..=403 => Duration::from_secs(600),
         _ => Duration::from_secs(10),
     }
 }

@@ -1,301 +1,130 @@
+//! Credentials: password hashes, session tokens, API keys, accounts.
+
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
-use axum::{Extension, extract::{Json, State}, http::{HeaderMap, StatusCode}};
-use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey};
+use axum::http::{HeaderMap, StatusCode};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
-use crate::{AppState, db, guard::PublicRequest};
+use crate::db::{self, Db, users::User};
+use crate::error::{Error, Result};
 
-#[derive(Serialize, Deserialize)]
-pub struct Claims {
-    pub sub: String, // username
-    /// User id, so a token stops working if its user is deleted and the name reused
-    #[serde(default)]
-    pub uid: i64,
-    pub is_admin: bool,
-    pub exp: usize,
-}
+pub const MIN_PASSWORD_LEN: usize = 8;
+const SESSION_SECS: u64 = 7 * 86400;
 
-#[derive(Deserialize)]
-pub struct AuthReq {
-    pub username: String,
-    pub password: String,
-    pub email: Option<String>,
-}
+// ── Passwords ──
 
-#[derive(Serialize)]
-pub struct AuthResp {
-    pub token: String,
-    pub api_key: String,
-}
-
-pub fn hash_password(password: &str) -> Result<String, StatusCode> {
+fn hash_now(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+    Argon2::default().hash_password(password.as_bytes(), &salt)
         .map(|h| h.to_string())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| Error::Internal(format!("hashing a password: {e}")))
 }
 
-pub fn verify_password(password: &str, hash: &str) -> bool {
-    PasswordHash::new(hash)
-        .and_then(|h| Argon2::default().verify_password(password.as_bytes(), &h))
-        .is_ok()
+/// Argon2 is deliberately slow, so it runs off the async workers.
+pub async fn hash_password(password: String) -> Result<String> {
+    tokio::task::spawn_blocking(move || hash_now(&password)).await.map_err(|e| Error::Internal(e.to_string()))?
 }
 
-fn make_jwt(state: &AppState, user: &db::User, is_admin: bool) -> Result<String, StatusCode> {
-    let claims = Claims {
-        sub: user.username.clone(),
-        uid: user.id,
-        is_admin,
-        exp: (chrono_now() + 86400 * 7) as usize, // 7 days
-    };
-    encode(&Header::default(), &claims, &EncodingKey::from_secret(state.jwt_secret.as_bytes()))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+/// Whether `password` matches `hash`. With no hash (an unknown user) a dummy one is checked,
+/// so the time taken doesn't reveal which names exist.
+pub async fn verify_password(password: String, hash: Option<String>) -> bool {
+    tokio::task::spawn_blocking(move || {
+        let hash = hash.unwrap_or_else(|| dummy_hash().to_string());
+        PasswordHash::new(&hash)
+            .and_then(|h| Argon2::default().verify_password(password.as_bytes(), &h))
+            .is_ok()
+    }).await.unwrap_or(false)
 }
 
-/// A hash of a random password, checked against when the user doesn't exist.
 fn dummy_hash() -> &'static str {
     static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    HASH.get_or_init(|| hash_password(&uuid::Uuid::new_v4().to_string()).unwrap_or_default())
+    HASH.get_or_init(|| hash_now(&uuid::Uuid::new_v4().to_string()).unwrap_or_default())
 }
 
-fn chrono_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
-}
-
-pub fn extract_bearer(headers: &HeaderMap) -> Option<String> {
-    headers.get("authorization")?
-        .to_str().ok()?
-        .strip_prefix("Bearer ")
-        .map(|s| s.to_string())
-}
-
-pub fn decode_jwt(state: &AppState, token: &str) -> Result<Claims, StatusCode> {
-    decode::<Claims>(token, &DecodingKey::from_secret(state.jwt_secret.as_bytes()), &Validation::default())
-        .map(|d| d.claims)
-        .map_err(|_| StatusCode::UNAUTHORIZED)
-}
-
-/// The user behind a request: API clients send their key (`/v1/user/…`), the pages a JWT.
-pub async fn current_user(state: &AppState, headers: &HeaderMap) -> Result<db::User, StatusCode> {
-    match crate::relay::extract_api_key(headers) {
-        Some(key) if key.starts_with("sk-") => db::find_user_by_api_key(&state.db, &key).await.map_err(|_| StatusCode::UNAUTHORIZED),
-        _ => signed_in_user(state, headers).await,
+/// Set a user's password; 422 when it is too short, 404 when there is no such user.
+pub async fn set_password(db: &Db, user_id: i64, password: String) -> Result<()> {
+    if password.chars().count() < MIN_PASSWORD_LEN {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY.into());
     }
+    let hash = hash_password(password).await?;
+    if db::users::set_password_hash(db, user_id, &hash).await? { Ok(()) } else { Err(StatusCode::NOT_FOUND.into()) }
 }
 
-/// The signed-in user behind a request's JWT.
-async fn signed_in_user(state: &AppState, headers: &HeaderMap) -> Result<db::User, StatusCode> {
-    let token = extract_bearer(headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    let claims = decode_jwt(state, &token)?;
-    let user = db::find_user_by_username(&state.db, &claims.sub).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
-    if user.id != claims.uid {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    Ok(user)
-}
-
-pub async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<db::User, StatusCode> {
-    // The database decides, so a revoked admin's unexpired token stops working.
-    // Only a signed-in session: an API key alone never reaches the admin API.
-    let user = signed_in_user(state, headers).await?;
-    if !user.is_admin {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    Ok(user)
-}
+// ── Accounts ──
 
 /// `sk-<username>-relay-<uuid>`; the name is cosmetic, the uuid carries all the secrecy.
-fn new_api_key(username: &str) -> String {
-    let name: String = username.chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .take(16)
-        .collect::<String>()
-        .to_ascii_lowercase();
+pub fn new_api_key(username: &str) -> String {
+    let name: String = username.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect::<String>().to_ascii_lowercase();
     let random = uuid::Uuid::new_v4().simple();
-    if name.is_empty() {
-        format!("sk-relay-{random}")
-    } else {
-        format!("sk-{name}-relay-{random}")
-    }
+    if name.is_empty() { format!("sk-relay-{random}") } else { format!("sk-{name}-relay-{random}") }
 }
 
-pub async fn create_user_internal(pool: &sqlx::SqlitePool, username: &str, email: &str, password: &str, is_admin: bool) -> Result<db::User, StatusCode> {
-    // No password (LazyCat sign-in users): a random one nobody knows
+/// Whether a credential is one of our API keys rather than a session token.
+pub fn is_api_key(credential: &str) -> bool {
+    credential.starts_with("sk-")
+}
+
+/// A new account; 409 when the name is taken. Without a password (LazyCat sign-in users)
+/// it gets a random one nobody knows.
+pub async fn create_user(db: &Db, username: &str, email: &str, password: &str, is_admin: bool) -> Result<User> {
     let password = if password.is_empty() { uuid::Uuid::new_v4().to_string() } else { password.to_string() };
-    // Argon2 is deliberately slow; keep it off the async workers
-    let pw_hash = tokio::task::spawn_blocking(move || hash_password(&password)).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
-    let api_key = new_api_key(username);
-    db::insert_user(pool, username, email, &pw_hash, &api_key, is_admin)
-        .await
-        .map_err(|_| StatusCode::CONFLICT)
+    let hash = hash_password(password).await?;
+    let new = db::users::NewUser { username, email, password_hash: &hash, api_key: &new_api_key(username), is_admin };
+    db::users::insert(db, &new).await?.ok_or(Error::Status(StatusCode::CONFLICT))
 }
 
-// ── Handlers ──
+// ── Sessions ──
 
-pub async fn register(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<AuthReq>,
-) -> Result<Json<AuthResp>, StatusCode> {
-    // On LazyCat, accounts come from LazyCat sign-in instead
-    if state.lazycat {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let email = req.email.as_deref().unwrap_or("");
-    if email.is_empty() || !email.contains('@') {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    // Registration only bootstraps the first (admin) user; the admin adds everyone else
-    let count = db::user_count(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if count > 0 {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let user = create_user_internal(&state.db, &req.username, email, &req.password, true).await?;
-    let token = make_jwt(&state, &user, user.is_admin)?;
-    Ok(Json(AuthResp { token, api_key: user.api_key }))
+#[derive(Serialize, Deserialize)]
+struct Claims {
+    /// Username
+    sub: String,
+    /// User id, so a token stops working if its user is deleted and the name reused
+    #[serde(default)]
+    uid: i64,
+    is_admin: bool,
+    exp: usize,
 }
 
-pub async fn login(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    public: Option<Extension<PublicRequest>>,
-    Json(req): Json<AuthReq>,
-) -> Result<Json<AuthResp>, StatusCode> {
-    // On LazyCat the LAN side signs in through LazyCat; passwords are for the public address
-    if state.lazycat && public.is_none() {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let ip = crate::guard::client_ip(&headers, public.is_some());
-    if ip.as_deref().is_some_and(|ip| state.guard.blocked(ip)) {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
-    // Try username first, then email
-    let user = match db::find_user_by_username(&state.db, &req.username).await {
-        Ok(u) => Some(u),
-        Err(_) => db::find_user_by_email(&state.db, &req.username).await.ok(),
+pub fn issue_session(secret: &str, user: &User) -> Result<String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let claims = Claims { sub: user.username.clone(), uid: user.id, is_admin: user.is_admin, exp: (now + SESSION_SECS) as usize };
+    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes())).map_err(|e| Error::Internal(e.to_string()))
+}
+
+/// The user a session token was issued to, if it is valid and they still exist.
+pub async fn session_user(db: &Db, secret: &str, token: &str) -> Result<Option<User>> {
+    let Ok(data) = decode::<Claims>(token, &DecodingKey::from_secret(secret.as_bytes()), &Validation::default()) else {
+        return Ok(None);
     };
-    // Unknown users still pay for a hash, so response time doesn't reveal which names exist
-    let hash = user.as_ref().map(|u| u.password_hash.clone());
-    let password = req.password.clone();
-    let ok = tokio::task::spawn_blocking(move || match &hash {
-        Some(h) => verify_password(&password, h),
-        None => verify_password(&password, dummy_hash()),
-    }).await.unwrap_or(false);
-    let Some(user) = user.filter(|_| ok) else {
-        eprintln!("login failed for {:?} from {}", req.username, ip.as_deref().unwrap_or("unknown"));
-        if let Some(ip) = &ip {
-            state.guard.fail(ip);
-        }
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-    let token = make_jwt(&state, &user, user.is_admin)?;
-    Ok(Json(AuthResp { token, api_key: user.api_key }))
+    Ok(db::users::by_username(db, &data.claims.sub).await?.filter(|u| u.id == data.claims.uid))
 }
 
-/// How the home page should offer sign-in on this address.
-pub async fn options(
-    State(state): State<Arc<AppState>>,
-    public: Option<Extension<PublicRequest>>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let public = public.is_some();
-    let register = !public && !state.lazycat
-        && db::user_count(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? == 0;
-    Ok(Json(serde_json::json!({ "public": public, "register": register })))
+/// The credential a request carries: `Authorization: Bearer …`, or `x-api-key` (Anthropic clients).
+pub fn credential(headers: &HeaderMap) -> Option<&str> {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    header("authorization").and_then(|v| v.strip_prefix("Bearer ")).or_else(|| header("x-api-key"))
 }
 
-const MIN_PASSWORD_LEN: usize = 8;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub async fn set_password(pool: &sqlx::SqlitePool, user_id: i64, password: String) -> Result<(), StatusCode> {
-    if password.chars().count() < MIN_PASSWORD_LEN {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    #[test]
+    fn api_keys_carry_a_cleaned_name() {
+        assert!(new_api_key("Ana.The-Party").starts_with("sk-anatheparty-relay-"));
+        assert!(new_api_key("中文").starts_with("sk-relay-"));
+        assert!(is_api_key(&new_api_key("x")));
     }
-    let pw_hash = tokio::task::spawn_blocking(move || hash_password(&password)).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
-    match db::update_user_password(pool, user_id, &pw_hash).await {
-        Ok(0) => Err(StatusCode::NOT_FOUND),
-        Ok(_) => Ok(()),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+
+    #[test]
+    fn credentials_come_from_either_header() {
+        let mut h = HeaderMap::new();
+        assert_eq!(credential(&h), None);
+        h.insert("x-api-key", "sk-a".parse().unwrap());
+        assert_eq!(credential(&h), Some("sk-a"));
+        h.insert("authorization", "Bearer sk-b".parse().unwrap());
+        assert_eq!(credential(&h), Some("sk-b"));
     }
-}
-
-#[derive(Deserialize)]
-pub struct ChangePasswordReq {
-    pub current_password: String,
-    pub new_password: String,
-}
-
-/// A signed-in user changes their own password; a stolen session alone can't.
-pub async fn change_password(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    public: Option<Extension<PublicRequest>>,
-    Json(req): Json<ChangePasswordReq>,
-) -> Result<StatusCode, StatusCode> {
-    let ip = crate::guard::client_ip(&headers, public.is_some());
-    if ip.as_deref().is_some_and(|ip| state.guard.blocked(ip)) {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
-    let user = current_user(&state, &headers).await?;
-    let hash = user.password_hash.clone();
-    let current = req.current_password;
-    let ok = tokio::task::spawn_blocking(move || verify_password(&current, &hash)).await.unwrap_or(false);
-    if !ok {
-        if let Some(ip) = &ip {
-            state.guard.fail(ip);
-        }
-        return Err(StatusCode::FORBIDDEN);
-    }
-    set_password(&state.db, user.id, req.new_password).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// Sign in as the LazyCat user making the request.
-///
-/// LazyCat's gateway authenticates every request outside `public_path` and sets `X-HC-User-ID`
-/// and `X-HC-User-Role`, so they can be trusted — but only when running on LazyCat, which is
-/// why this is off unless `LAZYCAT` is set. LazyCat admins get an account automatically;
-/// other LazyCat users need an admin to add their username first.
-pub async fn sso(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<Json<AuthResp>, StatusCode> {
-    if !state.lazycat {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty());
-    let uid = header("x-hc-user-id").ok_or(StatusCode::UNAUTHORIZED)?;
-    let is_admin = header("x-hc-user-role") == Some("ADMIN");
-
-    let user = match db::find_user_by_username(&state.db, uid).await {
-        Ok(user) => {
-            // LazyCat decides who is an admin
-            if user.is_admin != is_admin {
-                db::set_user_admin(&state.db, user.id, is_admin).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            }
-            user
-        }
-        Err(_) if is_admin => create_user_internal(&state.db, uid, "", "", true).await?,
-        Err(_) => return Err(StatusCode::FORBIDDEN),
-    };
-    let token = make_jwt(&state, &user, is_admin)?;
-    Ok(Json(AuthResp { token, api_key: user.api_key }))
-}
-
-pub async fn get_api_key(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let user = current_user(&state, &headers).await?;
-    Ok(Json(serde_json::json!({ "api_key": user.api_key })))
-}
-
-pub async fn refresh_api_key(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let user = current_user(&state, &headers).await?;
-    let new_key = new_api_key(&user.username);
-    db::update_user_api_key(&state.db, user.id, &new_key).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(serde_json::json!({ "api_key": new_key })))
 }

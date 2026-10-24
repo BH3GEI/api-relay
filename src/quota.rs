@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::{AppState, db};
+use crate::{AppState, db::{self, providers::Provider}};
 
 // Admin pages poll often; the upstream numbers don't move that fast
 const CACHE_FOR: Duration = Duration::from_secs(60);
@@ -20,14 +20,17 @@ pub struct Window {
     pub resets_at: Option<u64>,
 }
 
+/// When a key's quota was fetched, and what came back (None when the upstream doesn't report it).
+type Fetched = (Instant, Option<Vec<Window>>);
+
 #[derive(Default)]
 pub struct QuotaCache {
-    entries: Mutex<HashMap<String, (Instant, Option<Vec<Window>>)>>,
+    entries: Mutex<HashMap<String, Fetched>>,
 }
 
 impl QuotaCache {
     /// The key's quota windows, or None when the upstream doesn't report quota.
-    pub async fn get(&self, state: &AppState, provider: &db::Provider, key: &str) -> Option<Vec<Window>> {
+    pub async fn get(&self, state: &AppState, provider: &Provider, key: &str) -> Option<Vec<Window>> {
         if let Some((at, cached)) = self.entries.lock().unwrap().get(key) {
             if at.elapsed() < CACHE_FOR {
                 return cached.clone();
@@ -66,11 +69,12 @@ pub struct KeyQuota {
 /// What's left of each enabled provider's plan, per enabled key and in total.
 /// Providers whose upstream doesn't report quota are left out.
 pub async fn pool(state: &AppState) -> Vec<PoolQuota> {
-    let Ok(providers) = db::list_enabled_providers(&state.db).await else { return Vec::new() };
+    let Ok(providers) = db::providers::list_enabled(&state.db).await else { return Vec::new() };
     let per_provider = futures::future::join_all(providers.iter().map(|p| async move {
-        let keys = db::get_provider_keys(&state.db, p.id).await.unwrap_or_default();
+        let keys = db::providers::keys(&state.db, p.id).await.unwrap_or_default();
+        let keys: Vec<_> = keys.into_iter().filter(|k| k.enabled).collect();
         let quotas = futures::future::join_all(keys.iter().map(|k| state.quota.get(state, p, &k.api_key))).await;
-        let reported: Vec<(&db::ProviderKey, Vec<Window>)> = keys.iter().zip(quotas)
+        let reported: Vec<(&db::providers::ProviderKey, Vec<Window>)> = keys.iter().zip(quotas)
             .filter_map(|(k, q)| q.map(|q| (k, q))).collect();
         let windows = summarize(&reported.iter().map(|(_, q)| q.clone()).collect::<Vec<_>>());
         let keys = reported.iter().map(|(k, q)| KeyQuota {
@@ -101,7 +105,7 @@ fn summarize(keys: &[Vec<Window>]) -> Vec<PoolWindow> {
     }).collect()
 }
 
-async fn fetch(state: &AppState, provider: &db::Provider, key: &str) -> Option<Vec<Window>> {
+async fn fetch(state: &AppState, provider: &Provider, key: &str) -> Option<Vec<Window>> {
     let base = provider.base_url.trim_end_matches('/');
     let host = reqwest::Url::parse(base).ok()?.host_str()?.to_string();
     let url = if host == "api.kimi.com" {
