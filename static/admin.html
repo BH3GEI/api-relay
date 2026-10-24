@@ -235,7 +235,7 @@ async function loadUsers() {
   tb.innerHTML = users.map(u => `<tr>
     <td>${u.id}</td><td>${esc(u.username)}</td><td>${esc(u.email || '-')}</td><td><code style="font-size:11px">${esc(u.api_key)}</code></td>
     <td>${u.is_admin ? 'Yes' : 'No'}</td>
-    <td><button class="btn-danger btn-sm" onclick="deleteUser(${u.id})">Delete</button></td>
+    <td><button class="secondary btn-sm" onclick="setPassword(${u.id})">Set Password</button> <button class="btn-danger btn-sm" onclick="deleteUser(${u.id})">Delete</button></td>
   </tr>`).join('');
 }
 async function createUser() {
@@ -246,6 +246,15 @@ async function createUser() {
     is_admin: document.getElementById('new-admin').checked
   })});
   loadUsers();
+}
+// For signing in on the public address
+async function setPassword(id) {
+  const pw = prompt('New password (at least 8 characters):');
+  if (pw === null) return;
+  try {
+    await api('/admin/users/'+id+'/password', { method:'PUT', body: JSON.stringify({ password: pw }) });
+    alert('Password set');
+  } catch (e) { alert('Failed: ' + (e.message || 'password too short?')); }
 }
 async function deleteUser(id) {
   if (!confirm('Delete user?')) return;

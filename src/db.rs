@@ -198,6 +198,11 @@ pub async fn update_user_api_key(pool: &SqlitePool, user_id: i64, new_key: &str)
     Ok(())
 }
 
+pub async fn update_user_password(pool: &SqlitePool, user_id: i64, password_hash: &str) -> Result<u64, sqlx::Error> {
+    let r = sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?").bind(password_hash).bind(user_id).execute(pool).await?;
+    Ok(r.rows_affected())
+}
+
 pub async fn set_user_admin(pool: &SqlitePool, user_id: i64, is_admin: bool) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE users SET is_admin = ? WHERE id = ?").bind(is_admin).bind(user_id).execute(pool).await?;
     Ok(())

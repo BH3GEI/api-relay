@@ -39,6 +39,53 @@ impl QuotaCache {
     }
 }
 
+/// One plan window summed over a provider's keys, as users see it.
+#[derive(Clone, Serialize, PartialEq, Debug)]
+pub struct PoolWindow {
+    pub label: String,
+    pub remaining_percent: f64,
+    /// When the first key's window resets, i.e. when the pool next gains room
+    pub resets_at: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct PoolQuota {
+    pub provider: String,
+    pub windows: Vec<PoolWindow>,
+}
+
+/// What's left of each enabled provider's plan across its enabled keys. Users get the
+/// pool as a whole, not its keys; providers whose upstream doesn't report quota are left out.
+pub async fn pool(state: &AppState) -> Vec<PoolQuota> {
+    let Ok(providers) = db::list_enabled_providers(&state.db).await else { return Vec::new() };
+    let per_provider = futures::future::join_all(providers.iter().map(|p| async move {
+        let keys = db::get_provider_keys(&state.db, p.id).await.unwrap_or_default();
+        let quotas = futures::future::join_all(keys.iter().map(|k| state.quota.get(state, p, &k.api_key))).await;
+        let windows = summarize(&quotas.into_iter().flatten().collect::<Vec<_>>());
+        (!windows.is_empty()).then(|| PoolQuota { provider: p.name.clone(), windows })
+    })).await;
+    per_provider.into_iter().flatten().collect()
+}
+
+/// Requests spread over the keys, so the pool has the average key's share left.
+fn summarize(keys: &[Vec<Window>]) -> Vec<PoolWindow> {
+    let mut labels: Vec<&str> = Vec::new();
+    for w in keys.iter().flatten() {
+        if !labels.contains(&w.label.as_str()) {
+            labels.push(&w.label);
+        }
+    }
+    labels.into_iter().map(|label| {
+        let windows: Vec<&Window> = keys.iter().flatten().filter(|w| w.label == label).collect();
+        let remaining = windows.iter().map(|w| (100.0 - w.used_percent).clamp(0.0, 100.0)).sum::<f64>() / windows.len() as f64;
+        PoolWindow {
+            label: label.to_string(),
+            remaining_percent: (remaining * 10.0).round() / 10.0,
+            resets_at: windows.iter().filter_map(|w| w.resets_at).min(),
+        }
+    }).collect()
+}
+
 async fn fetch(state: &AppState, provider: &db::Provider, key: &str) -> Option<Vec<Window>> {
     let base = provider.base_url.trim_end_matches('/');
     let host = reqwest::Url::parse(base).ok()?.host_str()?.to_string();
@@ -158,6 +205,21 @@ mod tests {
         let w = parse_kimi(&body).unwrap();
         assert_eq!((w[0].label.as_str(), w[0].used_percent, w[0].resets_at), ("5h", 0.0, None));
         assert_eq!((w[1].label.as_str(), w[1].used_percent), ("week", 0.0));
+    }
+
+    #[test]
+    fn pools_keys() {
+        let w = |label: &str, used: f64, reset: Option<u64>| Window { label: label.into(), used_percent: used, resets_at: reset };
+        let keys = vec![
+            vec![w("5h", 100.0, Some(200)), w("week", 40.0, Some(900))],
+            vec![w("5h", 20.0, Some(100)), w("week", 120.0, None)],
+            vec![w("5h", 0.0, None)],
+        ];
+        assert_eq!(summarize(&keys), vec![
+            PoolWindow { label: "5h".into(), remaining_percent: 60.0, resets_at: Some(100) },
+            PoolWindow { label: "week".into(), remaining_percent: 30.0, resets_at: Some(900) },
+        ]);
+        assert!(summarize(&[]).is_empty());
     }
 
     #[test]

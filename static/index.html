@@ -166,6 +166,15 @@ a:hover { text-decoration: underline; }
     </table>
   </div>
 
+  <!-- Pool quota -->
+  <div class="card">
+    <h2>号池余量</h2>
+    <p>所有用户共用这些套餐，数字是整个号池还剩多少。API 也能查：<code>GET <span class="base-url"></span>/v1/quota</code>（带 API Key）。</p>
+    <table class="config-table" id="quota-table">
+      <tr><td>Loading...</td><td></td></tr>
+    </table>
+  </div>
+
   <!-- API Key -->
   <div class="card">
     <h2>Your API Key</h2>
@@ -179,6 +188,17 @@ a:hover { text-decoration: underline; }
     <div class="info-box" style="margin-top:12px">
       Regenerate 会让旧 Key 立刻失效，所有使用旧 Key 的工具需要重新配置。
     </div>
+  </div>
+
+  <!-- Password -->
+  <div class="card">
+    <h2>修改密码</h2>
+    <p>在 <span class="base-url"></span> 用用户名和密码登录本页。</p>
+    <input id="pw-current" type="password" placeholder="当前密码" autocomplete="current-password">
+    <input id="pw-new" type="password" placeholder="新密码（至少 8 位）" autocomplete="new-password">
+    <input id="pw-new2" type="password" placeholder="再输一次新密码" autocomplete="new-password">
+    <button class="secondary" onclick="changePassword()">修改密码</button>
+    <div id="pw-msg" class="msg hidden"></div>
   </div>
 
   <!-- Models -->
@@ -222,7 +242,7 @@ a:hover { text-decoration: underline; }
   </div>
 
   <div style="margin-top:16px;display:flex;gap:8px">
-    <a href="/admin"><button class="secondary">Admin Panel</button></a>
+    <a id="admin-link-bottom" href="/admin" class="hidden"><button class="secondary">Admin Panel</button></a>
     <button class="secondary" onclick="logout()">Logout</button>
   </div>
 </div>
@@ -239,11 +259,18 @@ document.querySelectorAll('.base-url').forEach(el => el.textContent = BASE);
 let token = localStorage.getItem('token');
 let apiKey = '';
 
-// On LazyCat, sign in as the current LazyCat user; elsewhere fall back to the password form
-fetch(BASE + '/auth/sso').then(r => r.ok ? r.json() : null).then(res => {
-  if (res) { token = res.token; localStorage.setItem('token', token); }
-  if (token) loadDashboard();
-}).catch(() => { if (token) loadDashboard(); });
+// The public address has no admin and no LazyCat sign-in; registration only bootstraps the first user
+let PUBLIC = false;
+fetch(BASE + '/auth/options').then(r => r.ok ? r.json() : {}).catch(() => ({})).then(opts => {
+  PUBLIC = opts.public === true;
+  if (!opts.register) document.getElementById('tab-register-btn').classList.add('hidden');
+  // On LazyCat, sign in as the current LazyCat user; elsewhere fall back to the password form
+  const sso = PUBLIC ? Promise.resolve(null) : fetch(BASE + '/auth/sso').then(r => r.ok ? r.json() : null).catch(() => null);
+  return sso.then(res => {
+    if (res) { token = res.token; localStorage.setItem('token', token); }
+    if (token) loadDashboard();
+  });
+});
 
 function showMsg(id, msg, ok) {
   const el = document.getElementById(id);
@@ -257,6 +284,7 @@ async function api(path, opts = {}) {
   if (token) headers['Authorization'] = 'Bearer ' + token;
   const r = await fetch(BASE + path, { ...opts, headers });
   if (!r.ok) throw new Error(await r.text() || r.statusText);
+  if (r.status === 204) return null;
   return r.json();
 }
 
@@ -306,7 +334,9 @@ function isAdmin() {
 }
 
 async function loadDashboard() {
-  document.getElementById('admin-link').classList.toggle('hidden', !isAdmin());
+  const showAdmin = isAdmin() && !PUBLIC;
+  document.getElementById('admin-link').classList.toggle('hidden', !showAdmin);
+  document.getElementById('admin-link-bottom').classList.toggle('hidden', !showAdmin);
   document.getElementById('auth-section').classList.add('hidden');
   document.getElementById('dashboard').classList.remove('hidden');
   try {
@@ -334,6 +364,22 @@ async function loadDashboard() {
         ut.innerHTML = '<tr><th style="color:#888;font-weight:600">Model</th><th style="color:#888;font-weight:600">Requests / Tokens</th></tr>' +
           usageData.map(u => { totalReq += u.requests; totalTok += u.total_tokens; return `<tr><td>${esc(u.model)}</td><td>${u.requests} req / ${u.total_tokens} tok</td></tr>`; }).join('') +
           `<tr style="border-top:2px solid #333"><td><strong>Total</strong></td><td><strong>${totalReq} req / ${totalTok} tok</strong></td></tr>`;
+      }
+    } catch(e) {}
+
+    // Pool quota: "5h 62% left · resets 18:00"
+    try {
+      const q = await api('/user/quota');
+      const qt = document.getElementById('quota-table');
+      if (!q.providers.length) {
+        qt.innerHTML = '<tr><td style="color:#666">上游没有提供余量信息</td><td></td></tr>';
+      } else {
+        qt.innerHTML = q.providers.map(p => `<tr><td>${esc(p.provider)}</td><td>${p.windows.map(w => {
+          const left = Math.round(w.remaining_percent);
+          const color = left <= 20 ? '#f87171' : left <= 50 ? '#fbbf24' : '#4ade80';
+          const reset = w.resets_at ? ` <span style="color:#666">· ${new Date(w.resets_at * 1000).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} 重置</span>` : '';
+          return `<span style="color:#888">${esc(w.label)}</span> <span style="color:${color}">剩 ${left}%</span>${reset}`;
+        }).join('<br>')}</td></tr>`).join('');
       }
     } catch(e) {}
 
@@ -464,6 +510,17 @@ async function refreshKey() {
   apiKey = res.api_key;
   document.getElementById('api-key-display').textContent = apiKey;
   loadDashboard();
+}
+
+async function changePassword() {
+  const pw = document.getElementById('pw-new').value;
+  if (pw !== document.getElementById('pw-new2').value) { showMsg('pw-msg', '两次输入的新密码不一致', false); return; }
+  if (pw.length < 8) { showMsg('pw-msg', '新密码至少 8 位', false); return; }
+  try {
+    await api('/user/password', { method: 'PUT', body: JSON.stringify({ current_password: document.getElementById('pw-current').value, new_password: pw }) });
+    ['pw-current', 'pw-new', 'pw-new2'].forEach(id => document.getElementById(id).value = '');
+    showMsg('pw-msg', '密码已修改', true);
+  } catch (e) { showMsg('pw-msg', '修改失败：当前密码不对，或尝试次数太多', false); }
 }
 
 function logout() {

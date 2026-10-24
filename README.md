@@ -19,6 +19,7 @@ Rust 单二进制 + SQLite，可以独立运行，也可以打包成懒猫微服
   | `POST /v1/chat/completions` | OpenAI 格式（Cursor、Cline、opencode、Aider） |
   | `POST /v1/responses` | OpenAI Responses 格式（Codex） |
   | `GET /v1/models` | 模型列表 |
+  | `GET /v1/quota` | 号池的上游套餐余量（按 provider 汇总，不含单个 key） |
   | `/v1/images/generations`、`/v1/videos/generations`、`/v1/files` | 图片、视频生成和文件上传 |
 
 - **key 池**：一直用优先级最高的那把 key，出问题才换。这样上游的提示缓存不会因为换账号而失效。出问题的 key 会冷却一段时间：
@@ -143,7 +144,7 @@ lzc-cli app install ./bh3gei.lzcapp.api-relay-v*.lpk
    - Cloudflare 后台：Zero Trust → Networks → Tunnels 创建隧道，复制 token，并添加 Public Hostname，服务填 `http://localhost:3001`。
 2. 在管理后台 Public Access 页填入 token，点 Save & connect；再把公网地址（如 `https://relay.example.com`）填进 Public URL，首页的配置示例就会显示这个地址。
 
-隧道只连到 relay 的公网专用端口（`PUBLIC_BIND_ADDR`，懒猫包里是 `127.0.0.1:3001`），这个端口只提供 `/v1/…` 接口：首页、管理后台和 `/auth` 都不在上面，因为它们信任懒猫网关注入的身份头，绕过网关就能被伪造。公网端口的防暴力破解按 Cloudflare 的 `CF-Connecting-IP` 计算。
+隧道只连到 relay 的公网专用端口（`PUBLIC_BIND_ADDR`，懒猫包里是 `127.0.0.1:3001`）。这个端口提供 `/v1/…` 接口和首页：用户在首页用用户名和密码登录，查看自己的 key 和用量、修改密码。密码由管理员在管理后台的 Users 页设置（Set Password）。管理后台和懒猫登录（`/auth/sso`）不在公网端口上：懒猫登录信任网关注入的身份头，绕过网关就能被伪造。反过来，懒猫内网那边只用懒猫登录，不接受密码登录。公网端口的防暴力破解按 Cloudflare 的 `CF-Connecting-IP` 计算。
 
 `cloudflared` 随懒猫包一起打包（版本和校验值固定在 `lazycat/build.sh` 里），由 relay 启动和管理：断开会自动重连，token 通过环境变量传入，不出现在进程参数里。
 
@@ -161,7 +162,7 @@ DATABASE_URL="sqlite:relay.db?mode=rwc" BIND_ADDR=127.0.0.1:3000 ./target/releas
 | `DATABASE_URL` | `sqlite:relay.db?mode=rwc` | SQLite 数据库 |
 | `BIND_ADDR` | `0.0.0.0:3000` | 监听地址 |
 | `JWT_SECRET` | 首次启动时生成并存入数据库 | 网页登录的签名密钥 |
-| `PUBLIC_BIND_ADDR` | 不设 | 公网专用端口，只提供 API，给隧道用 |
+| `PUBLIC_BIND_ADDR` | 不设 | 公网专用端口，提供 API 和首页（密码登录），给隧道用 |
 | `CLOUDFLARED_PATH` | 不设 | cloudflared 程序路径；同时设了 `PUBLIC_BIND_ADDR` 才会启用 Public Access |
 | `LAZYCAT` | 不设 | 设为 `1` 时信任懒猫网关注入的身份头。**只能在懒猫网关后面设置**，否则任何人都能伪造身份 |
 

@@ -1,11 +1,11 @@
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
-use axum::{extract::{Json, State}, http::{HeaderMap, StatusCode}};
+use axum::{Extension, extract::{Json, State}, http::{HeaderMap, StatusCode}};
 use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::{AppState, db};
+use crate::{AppState, db, guard::PublicRequest};
 
 #[derive(Serialize, Deserialize)]
 pub struct Claims {
@@ -151,12 +151,14 @@ pub async fn register(
 pub async fn login(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    public: Option<Extension<PublicRequest>>,
     Json(req): Json<AuthReq>,
 ) -> Result<Json<AuthResp>, StatusCode> {
-    if state.lazycat {
+    // On LazyCat the LAN side signs in through LazyCat; passwords are for the public address
+    if state.lazycat && public.is_none() {
         return Err(StatusCode::FORBIDDEN);
     }
-    let ip = crate::guard::client_ip(&headers, false);
+    let ip = crate::guard::client_ip(&headers, public.is_some());
     if ip.as_deref().is_some_and(|ip| state.guard.blocked(ip)) {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
@@ -181,6 +183,62 @@ pub async fn login(
     };
     let token = make_jwt(&state, &user, user.is_admin)?;
     Ok(Json(AuthResp { token, api_key: user.api_key }))
+}
+
+/// How the home page should offer sign-in on this address.
+pub async fn options(
+    State(state): State<Arc<AppState>>,
+    public: Option<Extension<PublicRequest>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let public = public.is_some();
+    let register = !public && !state.lazycat
+        && db::user_count(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? == 0;
+    Ok(Json(serde_json::json!({ "public": public, "register": register })))
+}
+
+const MIN_PASSWORD_LEN: usize = 8;
+
+pub async fn set_password(pool: &sqlx::SqlitePool, user_id: i64, password: String) -> Result<(), StatusCode> {
+    if password.chars().count() < MIN_PASSWORD_LEN {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let pw_hash = tokio::task::spawn_blocking(move || hash_password(&password)).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    match db::update_user_password(pool, user_id, &pw_hash).await {
+        Ok(0) => Err(StatusCode::NOT_FOUND),
+        Ok(_) => Ok(()),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ChangePasswordReq {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+/// A signed-in user changes their own password; a stolen session alone can't.
+pub async fn change_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    public: Option<Extension<PublicRequest>>,
+    Json(req): Json<ChangePasswordReq>,
+) -> Result<StatusCode, StatusCode> {
+    let ip = crate::guard::client_ip(&headers, public.is_some());
+    if ip.as_deref().is_some_and(|ip| state.guard.blocked(ip)) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    let user = current_user(&state, &headers).await?;
+    let hash = user.password_hash.clone();
+    let current = req.current_password;
+    let ok = tokio::task::spawn_blocking(move || verify_password(&current, &hash)).await.unwrap_or(false);
+    if !ok {
+        if let Some(ip) = &ip {
+            state.guard.fail(ip);
+        }
+        return Err(StatusCode::FORBIDDEN);
+    }
+    set_password(&state.db, user.id, req.new_password).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Sign in as the LazyCat user making the request.
