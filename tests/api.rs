@@ -122,8 +122,15 @@ async fn admin_manages_users() {
     assert_eq!(r.admin("POST", "/admin/users", Some(json!({ "username": "bob" }))).await.status, StatusCode::CONFLICT);
     assert_eq!(r.admin("PUT", &format!("/admin/users/{id}/password"), Some(json!({ "password": "short" }))).await.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(r.admin("PUT", "/admin/users/999/password", Some(json!({ "password": "long-enough" }))).await.status, StatusCode::NOT_FOUND);
+    let (other, _) = r.user("carol", "carolpassword").await;
+    for user in [id, other] {
+        r.admin("POST", "/admin/limits", Some(json!({ "user_id": user, "max_requests": 5 }))).await;
+    }
     assert_eq!(r.admin("DELETE", &format!("/admin/users/{id}"), None).await.status, StatusCode::NO_CONTENT);
     assert_eq!(r.lan("GET", "/v1/models", &[("authorization", &bearer(&key))], None).await.status, StatusCode::UNAUTHORIZED);
+    // Their limits go with them; others' stay
+    let left: Vec<_> = r.admin("GET", "/admin/limits", None).await.json().as_array().unwrap().iter().map(|l| l["user_id"].as_i64().unwrap()).collect();
+    assert_eq!(left, [other]);
 }
 
 #[tokio::test]

@@ -72,7 +72,10 @@ pub async fn set_admin(db: &Db, id: i64, is_admin: bool) -> sqlx::Result<()> {
     Ok(())
 }
 
+/// The user and their limits. Their usage stays, as history.
 pub async fn delete(db: &Db, id: i64) -> sqlx::Result<()> {
-    sqlx::query("DELETE FROM users WHERE id = ?").bind(id).execute(db).await?;
-    Ok(())
+    let mut tx = db.begin().await?;
+    sqlx::query("DELETE FROM usage_limits WHERE user_id = ?").bind(id).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM users WHERE id = ?").bind(id).execute(&mut *tx).await?;
+    tx.commit().await
 }
