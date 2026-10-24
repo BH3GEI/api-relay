@@ -1,0 +1,13 @@
+/* Shared by both pages */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+h1 { font-size: 24px; margin-bottom: 8px; color: #fff; }
+h2 { font-size: 18px; margin: 24px 0 12px; color: #ccc; }
+button:hover { background: #1d4ed8; }
+.secondary { background: #333; }
+.secondary:hover { background: #444; }
+.hidden { display: none; }
+.msg { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }
+.msg.error { background: #3b1111; color: #f87171; }
+.msg.ok { background: #0f2b1a; color: #4ade80; }
+.tab { padding: 8px 16px; border-radius: 6px; background: #222; color: #aaa; cursor: pointer; border: none; font-size: 14px; }
+.tab.active { background: #2563eb; color: #fff; }

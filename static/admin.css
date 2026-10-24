@@ -1,0 +1,16 @@
+body { font-family: -apple-system, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; padding: 40px 20px; }
+.container { max-width: 1100px; margin: 0 auto; }
+.subtitle { color: #666; margin-bottom: 24px; }
+.card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 20px; margin-bottom: 16px; overflow-x: auto; }
+input, select { padding: 8px 10px; border: 1px solid #333; border-radius: 6px; background: #111; color: #fff; font-size: 14px; margin-right: 8px; margin-bottom: 8px; }
+button { padding: 8px 16px; border: none; border-radius: 6px; background: #2563eb; color: #fff; font-size: 13px; cursor: pointer; margin-right: 4px; }
+.btn-danger { background: #991b1b; }
+.btn-danger:hover { background: #7f1d1d; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #222; }
+th { color: #888; font-weight: 600; white-space: nowrap; }
+td.actions { white-space: nowrap; text-align: right; }
+.url { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+.url-label { color: #666; font-size: 11px; margin-right: 4px; }
+.tabs { display: flex; gap: 4px; margin-bottom: 20px; }

@@ -11,8 +11,18 @@ use axum::{
 };
 use std::sync::OnceLock;
 
+const JS: &str = "text/javascript; charset=utf-8";
+const CSS: &str = "text/css; charset=utf-8";
+
+/// (name, content type, content)
 const FILES: &[(&str, &str, &str)] = &[
-    ("usage-chart.js", "text/javascript; charset=utf-8", include_str!("../static/usage-chart.js")),
+    ("base.css", CSS, include_str!("../static/base.css")),
+    ("index.css", CSS, include_str!("../static/index.css")),
+    ("admin.css", CSS, include_str!("../static/admin.css")),
+    ("common.js", JS, include_str!("../static/common.js")),
+    ("index.js", JS, include_str!("../static/index.js")),
+    ("admin.js", JS, include_str!("../static/admin.js")),
+    ("usage-chart.js", JS, include_str!("../static/usage-chart.js")),
 ];
 
 const INDEX: &str = include_str!("../static/index.html");
@@ -53,10 +63,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_file_a_page_loads_is_versioned() {
+    fn every_file_a_page_loads_is_served_and_versioned() {
         for page in [INDEX, ADMIN] {
+            for name in page.split("\"/static/").skip(1).map(|rest| rest.split('"').next().unwrap()) {
+                assert!(FILES.iter().any(|(n, _, _)| *n == name), "{name} is not in FILES");
+            }
             let served = versioned(page);
-            assert!(!served.contains("/static/") || served.matches("/static/").count() == served.matches("?v=").count());
+            assert_eq!(served.matches("\"/static/").count(), served.matches("?v=").count());
         }
     }
 }

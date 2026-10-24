@@ -157,7 +157,7 @@ lzc-cli app install ./bh3gei.lzcapp.api-relay-v*.lpk
 
 隧道只连到 relay 的公网专用端口（`PUBLIC_BIND_ADDR`，懒猫包里是 `127.0.0.1:3001`）。这个端口提供 `/v1/…` 接口和首页：用户在首页用用户名和密码登录，查看自己的 key 和用量、修改密码。密码由管理员在管理后台的 Users 页设置（Set Password）。管理后台和懒猫登录（`/auth/sso`）不在公网端口上：懒猫登录信任网关注入的身份头，绕过网关就能被伪造。反过来，懒猫内网那边只用懒猫登录，不接受密码登录。公网端口的防暴力破解按 Cloudflare 的 `CF-Connecting-IP` 计算。
 
-`cloudflared` 随懒猫包一起打包（版本和校验值固定在 `lazycat/build.sh` 里），由 relay 启动和管理：断开会自动重连，token 通过环境变量传入，不出现在进程参数里。
+`cloudflared` 随懒猫包一起打包（版本和校验值固定在 `lazycat/build.sh` 里），由 relay 启动和管理，token 通过环境变量传入，不出现在进程参数里。cloudflared 进程退出会被重新拉起；进程还在、但连续一分钟报告没有可用的边缘连接（`/ready`），也会被重启。连接、断开、重试和重启都记在 `TUNNEL_LOG`（懒猫包里是 `/lzcapp/var/tunnel.log`），升级换了容器也还在。
 
 ### 独立运行
 
@@ -175,6 +175,7 @@ DATABASE_URL="sqlite:relay.db?mode=rwc" BIND_ADDR=127.0.0.1:3000 ./target/releas
 | `JWT_SECRET` | 首次启动时生成并存入数据库 | 网页登录的签名密钥 |
 | `PUBLIC_BIND_ADDR` | 不设 | 公网专用端口，提供 API 和首页（密码登录），给隧道用 |
 | `CLOUDFLARED_PATH` | 不设 | cloudflared 程序路径；同时设了 `PUBLIC_BIND_ADDR` 才会启用 Public Access |
+| `TUNNEL_LOG` | 不设 | 隧道连接事件的日志文件（最多 1 MB） |
 | `LAZYCAT` | 不设 | 设为 `1` 时信任懒猫网关注入的身份头。**只能在懒猫网关后面设置**，否则任何人都能伪造身份 |
 
 对外提供服务时请放在 HTTPS 反向代理后面。
@@ -190,6 +191,30 @@ DATABASE_URL="sqlite:relay.db?mode=rwc" BIND_ADDR=127.0.0.1:3000 ./target/releas
 - 文件接口校验 file id，防止路径穿越到上游的其他接口。
 - 日志里的 key 只显示最后 4 位。
 - relay key 泄露时，在首页点 Regenerate Key 换一把新的，旧 key 立即失效。
+
+## 开发
+
+```bash
+cargo test            # 单元测试 + tests/ 里的 HTTP 级测试
+cargo clippy --all-targets
+```
+
+`tests/` 用临时数据库起一个完整的 relay，接一个假上游（`tests/common`），通过两个 router 直接发请求，覆盖登录、限流、管理接口、转发和换 key、用量统计、限额，以及从最老的数据库格式迁移。改动行为时先改测试。
+
+代码结构：
+
+| 位置 | 内容 |
+|---|---|
+| `src/lib.rs` | 两个监听端口各自提供哪些路由 |
+| `src/config.rs` | 环境变量 |
+| `src/extract.rs` | 谁在请求：`Session`（网页登录）、`Admin`、`Caller`（key 或网页登录）、`Origin`（哪个端口、客户端地址），以及 API key 中间件 |
+| `src/error.rs` | handler 的错误类型：内部错误记日志后返回 500，API 错误带 JSON 错误体 |
+| `src/auth.rs` | 密码哈希、会话 token、API key、建账号 |
+| `src/handlers/` | `sign_in`（登录）、`user`（首页和 `/v1/user` 的功能）、`admin`（管理接口） |
+| `src/proxy/` | 转发：模型调用（`mod.rs`）、模型列表、文件接口 |
+| `src/db/` | 存储，按记录类型分模块；`schema.rs` 用 `PRAGMA user_version` 做迁移，新的表结构变更加在 `STEPS` 末尾 |
+| `src/catalog.rs`、`pool.rs`、`quota.rs`、`tokens.rs`、`tunnel.rs` | 模型目录、key 池、上游套餐余量、从响应里读 token 数、Cloudflare 隧道 |
+| `src/pages.rs`、`static/` | 两个页面和它们加载的文件；页面里写 `/static/<文件名>`，返回时自动加上内容哈希 |
 
 ## 许可证
 
