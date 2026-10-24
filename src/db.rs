@@ -358,12 +358,65 @@ pub struct UsageStats {
     pub total_tokens: i64,
 }
 
-pub async fn get_user_usage_today(pool: &SqlitePool, user_id: i64) -> Result<Vec<UsageStats>, sqlx::Error> {
+/// A calendar period in the viewer's time zone, bucketed for a chart.
+#[derive(Clone, Copy, serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Period {
+    /// Today, by hour
+    #[default]
+    Day,
+    /// This month, by day
+    Month,
+    /// This year, by month
+    Year,
+}
+
+impl Period {
+    /// (strftime of the period, strftime of a bucket within it)
+    fn formats(self) -> (&'static str, &'static str) {
+        match self {
+            Period::Day => ("%Y-%m-%d", "%H"),
+            Period::Month => ("%Y-%m", "%d"),
+            Period::Year => ("%Y", "%m"),
+        }
+    }
+}
+
+/// Timestamps are stored in UTC; `tz_minutes` is the viewer's offset east of UTC.
+fn local_shift(tz_minutes: i64) -> String {
+    format!("{:+} minutes", tz_minutes.clamp(-14 * 60, 14 * 60))
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct UsageBucket {
+    /// "00"–"23" for a day, "01"–"31" for a month, "01"–"12" for a year
+    pub bucket: String,
+    pub requests: i64,
+    pub total_tokens: i64,
+}
+
+/// Usage over the current `period`, per bucket; one user's, or everyone's.
+pub async fn usage_series(pool: &SqlitePool, user_id: Option<i64>, period: Period, tz_minutes: i64) -> Result<Vec<UsageBucket>, sqlx::Error> {
+    let (period_fmt, bucket_fmt) = period.formats();
+    let shift = local_shift(tz_minutes);
+    // The created_at bound lets the index narrow the scan before the local-time filter
+    sqlx::query_as(
+        "SELECT strftime(?1, created_at, ?2) as bucket, COUNT(*) as requests, COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens
+         FROM usage_logs
+         WHERE (?3 IS NULL OR user_id = ?3) AND created_at >= datetime('now', '-367 days')
+           AND strftime(?4, created_at, ?2) = strftime(?4, 'now', ?2)
+         GROUP BY bucket ORDER BY bucket"
+    ).bind(bucket_fmt).bind(&shift).bind(user_id).bind(period_fmt).fetch_all(pool).await
+}
+
+pub async fn get_user_usage(pool: &SqlitePool, user_id: i64, period: Period, tz_minutes: i64) -> Result<Vec<UsageStats>, sqlx::Error> {
+    let (period_fmt, _) = period.formats();
     sqlx::query_as(
         "SELECT model, COUNT(*) as requests, COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens
-         FROM usage_logs WHERE user_id = ? AND date(created_at) = date('now')
-         GROUP BY model ORDER BY requests DESC"
-    ).bind(user_id).fetch_all(pool).await
+         FROM usage_logs WHERE user_id = ?1 AND created_at >= datetime('now', '-367 days')
+           AND strftime(?2, created_at, ?3) = strftime(?2, 'now', ?3)
+         GROUP BY model ORDER BY total_tokens DESC"
+    ).bind(user_id).bind(period_fmt).bind(local_shift(tz_minutes)).fetch_all(pool).await
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -375,16 +428,22 @@ pub struct AdminUsageStats {
     pub total_tokens: i64,
 }
 
-pub async fn get_all_usage_today(pool: &SqlitePool) -> Result<Vec<AdminUsageStats>, sqlx::Error> {
+pub async fn get_all_usage(pool: &SqlitePool, period: Period, tz_minutes: i64) -> Result<Vec<AdminUsageStats>, sqlx::Error> {
+    let (period_fmt, _) = period.formats();
     sqlx::query_as(
         "SELECT u.id as user_id, u.username, l.model, COUNT(*) as requests, COALESCE(SUM(l.input_tokens + l.output_tokens), 0) as total_tokens
          FROM usage_logs l JOIN users u ON l.user_id = u.id
-         WHERE date(l.created_at) = date('now')
-         GROUP BY u.id, l.model ORDER BY requests DESC"
-    ).fetch_all(pool).await
+         WHERE l.created_at >= datetime('now', '-367 days')
+           AND strftime(?1, l.created_at, ?2) = strftime(?1, 'now', ?2)
+         GROUP BY u.id, l.model ORDER BY total_tokens DESC"
+    ).bind(period_fmt).bind(local_shift(tz_minutes)).fetch_all(pool).await
 }
 
 // ── Usage Limits CRUD ──
+
+pub async fn list_user_limits(pool: &SqlitePool, user_id: i64) -> Result<Vec<UsageLimit>, sqlx::Error> {
+    sqlx::query_as("SELECT * FROM usage_limits WHERE user_id = ? ORDER BY model, window_secs").bind(user_id).fetch_all(pool).await
+}
 
 pub async fn list_limits(pool: &SqlitePool) -> Result<Vec<UsageLimit>, sqlx::Error> {
     sqlx::query_as("SELECT * FROM usage_limits ORDER BY user_id, model, window_secs").fetch_all(pool).await

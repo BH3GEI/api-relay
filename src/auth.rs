@@ -78,8 +78,16 @@ pub fn decode_jwt(state: &AppState, token: &str) -> Result<Claims, StatusCode> {
         .map_err(|_| StatusCode::UNAUTHORIZED)
 }
 
-/// The signed-in user behind a request's JWT.
+/// The user behind a request: API clients send their key (`/v1/user/…`), the pages a JWT.
 pub async fn current_user(state: &AppState, headers: &HeaderMap) -> Result<db::User, StatusCode> {
+    match crate::relay::extract_api_key(headers) {
+        Some(key) if key.starts_with("sk-") => db::find_user_by_api_key(&state.db, &key).await.map_err(|_| StatusCode::UNAUTHORIZED),
+        _ => signed_in_user(state, headers).await,
+    }
+}
+
+/// The signed-in user behind a request's JWT.
+async fn signed_in_user(state: &AppState, headers: &HeaderMap) -> Result<db::User, StatusCode> {
     let token = extract_bearer(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let claims = decode_jwt(state, &token)?;
     let user = db::find_user_by_username(&state.db, &claims.sub).await.map_err(|_| StatusCode::UNAUTHORIZED)?;
@@ -90,8 +98,9 @@ pub async fn current_user(state: &AppState, headers: &HeaderMap) -> Result<db::U
 }
 
 pub async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<db::User, StatusCode> {
-    // The database decides, so a revoked admin's unexpired token stops working
-    let user = current_user(state, headers).await?;
+    // The database decides, so a revoked admin's unexpired token stops working.
+    // Only a signed-in session: an API key alone never reaches the admin API.
+    let user = signed_in_user(state, headers).await?;
     if !user.is_admin {
         return Err(StatusCode::FORBIDDEN);
     }

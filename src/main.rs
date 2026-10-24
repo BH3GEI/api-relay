@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, Json, Path, State},
+    extract::{DefaultBodyLimit, Json, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware,
     response::{Html, Response},
@@ -124,6 +124,7 @@ async fn main() {
 fn user_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(page_index))
+        .route("/usage-chart.js", get(usage_chart_js))
         .route("/auth/login", post(auth::login))
         .route("/auth/options", get(auth::options))
         .route("/user/api-key", get(auth::get_api_key))
@@ -142,6 +143,13 @@ fn api_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/models", get(relay::list_models))
         .route("/v1/models/*id", get(relay::get_model))
         .route("/v1/quota", get(api_quota))
+        // Everything the home page does, for API clients signing with their key
+        .route("/v1/user/api-key", get(auth::get_api_key))
+        .route("/v1/user/api-key/refresh", post(auth::refresh_api_key))
+        .route("/v1/user/password", put(auth::change_password))
+        .route("/v1/user/usage", get(user_usage))
+        .route("/v1/user/quota", get(user_quota))
+        .route("/v1/user/config", get(user_config))
         .route("/v1/chat/completions", post(relay::chat_completions))
         .route("/v1/responses", post(relay::responses))
         .route("/v1/messages", post(relay::anthropic_messages))
@@ -164,12 +172,32 @@ async fn security_headers(mut resp: Response) -> Response {
     resp
 }
 
+const USAGE_CHART_JS: &str = include_str!("../static/usage-chart.js");
+
+/// A page with its script URL carrying the script's hash: Cloudflare caches .js for hours,
+/// and a changed script must not be served stale under the old URL.
+fn page(cell: &'static std::sync::OnceLock<String>, html: &'static str) -> Html<&'static str> {
+    Html(cell.get_or_init(|| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        USAGE_CHART_JS.hash(&mut h);
+        html.replace("/usage-chart.js\"", &format!("/usage-chart.js?v={:x}\"", h.finish()))
+    }))
+}
+
 async fn page_index() -> Html<&'static str> {
-    Html(include_str!("../static/index.html"))
+    static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    page(&PAGE, include_str!("../static/index.html"))
 }
 
 async fn page_admin() -> Html<&'static str> {
-    Html(include_str!("../static/admin.html"))
+    static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    page(&PAGE, include_str!("../static/admin.html"))
+}
+
+/// The usage chart both pages draw
+async fn usage_chart_js() -> ([(header::HeaderName, &'static str); 1], &'static str) {
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], USAGE_CHART_JS)
 }
 
 // ── Admin handlers ──
@@ -298,25 +326,46 @@ async fn admin_delete_provider_key(State(state): State<Arc<AppState>>, headers: 
 
 // ── Usage & Limits ──
 
-async fn user_usage(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Vec<db::UsageStats>>, StatusCode> {
+#[derive(Deserialize)]
+struct UsageQuery {
+    #[serde(default)]
+    period: db::Period,
+    /// The viewer's UTC offset in minutes, so "today" is their today
+    #[serde(default)]
+    tz: i64,
+}
+
+async fn user_usage(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<UsageQuery>) -> Result<Json<serde_json::Value>, StatusCode> {
     let user = auth::current_user(&state, &headers).await?;
-    db::get_user_usage_today(&state.db, user.id).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let err = |_| StatusCode::INTERNAL_SERVER_ERROR;
+    let series = db::usage_series(&state.db, Some(user.id), q.period, q.tz).await.map_err(err)?;
+    let models = db::get_user_usage(&state.db, user.id, q.period, q.tz).await.map_err(err)?;
+    Ok(Json(serde_json::json!({ "series": series, "models": models })))
 }
 
-/// Plan quota left in the shared pool, for the signed-in home page
+/// What a user has left: the shared pool's plan quota and their own limits (none means unlimited)
+async fn quota_for(state: &AppState, user_id: i64) -> Result<Json<serde_json::Value>, StatusCode> {
+    let limits = with_usage(state, db::list_user_limits(&state.db, user_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?).await?;
+    Ok(Json(serde_json::json!({ "providers": quota::pool(state).await, "limits": limits })))
+}
+
+/// For the signed-in home page
 async fn user_quota(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<serde_json::Value>, StatusCode> {
-    auth::current_user(&state, &headers).await?;
-    Ok(Json(serde_json::json!({ "providers": quota::pool(&state).await })))
+    let user = auth::current_user(&state, &headers).await?;
+    quota_for(&state, user.id).await
 }
 
-/// The same for API clients (status lines, agents); the key was checked by the API middleware
-async fn api_quota(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "providers": quota::pool(&state).await }))
+/// The same for API clients (status lines, agents), signing with their key
+async fn api_quota(state: State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<serde_json::Value>, StatusCode> {
+    user_quota(state, headers).await
 }
 
-async fn admin_usage(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Vec<db::AdminUsageStats>>, StatusCode> {
+async fn admin_usage(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<UsageQuery>) -> Result<Json<serde_json::Value>, StatusCode> {
     auth::require_admin(&state, &headers).await?;
-    db::get_all_usage_today(&state.db).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let err = |_| StatusCode::INTERNAL_SERVER_ERROR;
+    let series = db::usage_series(&state.db, None, q.period, q.tz).await.map_err(err)?;
+    let rows = db::get_all_usage(&state.db, q.period, q.tz).await.map_err(err)?;
+    Ok(Json(serde_json::json!({ "series": series, "rows": rows })))
 }
 
 #[derive(serde::Serialize)]
@@ -330,13 +379,17 @@ struct LimitWithUsage {
 async fn admin_list_limits(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Vec<LimitWithUsage>>, StatusCode> {
     auth::require_admin(&state, &headers).await?;
     let limits = db::list_limits(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    with_usage(&state, limits).await.map(Json)
+}
+
+async fn with_usage(state: &AppState, limits: Vec<db::UsageLimit>) -> Result<Vec<LimitWithUsage>, StatusCode> {
     let mut out = Vec::with_capacity(limits.len());
     for limit in limits {
         let used = db::window_usage(&state.db, limit.user_id, &limit.model, limit.window_secs).await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         out.push(LimitWithUsage { limit, used });
     }
-    Ok(Json(out))
+    Ok(out)
 }
 
 #[derive(Deserialize)]

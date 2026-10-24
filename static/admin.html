@@ -110,7 +110,14 @@ td.actions { white-space: nowrap; text-align: right; }
 
   <!-- Usage -->
   <div id="tab-usage" class="card hidden">
-    <h2>Today's Usage</h2>
+    <h2>Usage</h2>
+    <div style="display:flex;gap:4px;margin-bottom:12px">
+      <button class="tab active" data-period="day" onclick="loadUsage('day')">Today</button>
+      <button class="tab" data-period="month" onclick="loadUsage('month')">This month</button>
+      <button class="tab" data-period="year" onclick="loadUsage('year')">This year</button>
+    </div>
+    <p id="usage-total" style="color:#888;font-size:13px"></p>
+    <div id="usage-chart" style="margin:8px 0 12px"></div>
     <table><thead><tr><th>User</th><th>Model</th><th>Requests</th><th>Tokens</th></tr></thead><tbody id="usage-body"></tbody></table>
   </div>
 
@@ -161,6 +168,7 @@ td.actions { white-space: nowrap; text-align: right; }
 </div>
 </div>
 
+<script src="/usage-chart.js"></script>
 <script>
 const BASE = location.origin;
 // Everything shown from the server goes through this: model ids come from upstreams, names from users
@@ -316,11 +324,18 @@ async function loadModels() { renderModels(await api('/admin/catalog')); }
 async function refreshModels() { renderModels(await api('/admin/catalog/refresh', { method:'POST' })); }
 
 // Usage
-async function loadUsage() {
-  const usage = await api('/admin/usage');
-  document.getElementById('usage-body').innerHTML = usage.map(u =>
-    `<tr><td>${esc(u.username)}</td><td>${esc(u.model)}</td><td>${u.requests}</td><td>${u.total_tokens.toLocaleString()}</td></tr>`
-  ).join('') || '<tr><td colspan="4" style="color:#666">No usage today</td></tr>';
+// All users, for today / this month / this year in this browser's time zone
+let usagePeriod = 'day';
+const PERIOD_NAMES = { day: 'Today', month: 'This month', year: 'This year' };
+async function loadUsage(period = usagePeriod) {
+  usagePeriod = period;
+  document.querySelectorAll('[data-period]').forEach(b => b.classList.toggle('active', b.dataset.period === period));
+  const usage = await api(`/admin/usage?period=${period}&tz=${-new Date().getTimezoneOffset()}`);
+  const total = UsageChart.render(document.getElementById('usage-chart'), usage.series, period);
+  document.getElementById('usage-total').textContent = `${PERIOD_NAMES[period]}: ${total.tokens.toLocaleString()} tokens · ${total.requests.toLocaleString()} requests`;
+  document.getElementById('usage-body').innerHTML = usage.rows.map(u =>
+    `<tr><td>${esc(u.username)}</td><td>${esc(u.model)}</td><td>${u.requests.toLocaleString()}</td><td>${u.total_tokens.toLocaleString()}</td></tr>`
+  ).join('') || `<tr><td colspan="4" style="color:#666">No usage ${PERIOD_NAMES[period].toLowerCase()}</td></tr>`;
 }
 
 // Limits

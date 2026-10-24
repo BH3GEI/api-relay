@@ -19,8 +19,19 @@ Rust 单二进制 + SQLite，可以独立运行，也可以打包成懒猫微服
   | `POST /v1/chat/completions` | OpenAI 格式（Cursor、Cline、opencode、Aider） |
   | `POST /v1/responses` | OpenAI Responses 格式（Codex） |
   | `GET /v1/models` | 模型列表 |
-  | `GET /v1/quota` | 号池的上游套餐余量（按 provider 汇总，不含单个 key） |
   | `/v1/images/generations`、`/v1/videos/generations`、`/v1/files` | 图片、视频生成和文件上传 |
+
+- **首页能做的事都有对应的 API**，用 API key 认证（`Authorization: Bearer sk-…` 或 `x-api-key`）：
+
+  | 接口 | 用途 |
+  |---|---|
+  | `GET /v1/user/usage?period=day\|month\|year&tz=480` | 今天 / 本月 / 今年的用量，按小时 / 天 / 月分桶，另附按模型的合计；`tz` 是时区偏移（分钟，东八区填 480） |
+  | `GET /v1/quota`（同 `/v1/user/quota`） | 个人限额（含当前窗口已用量）和号池的上游套餐余量：每个 provider 的合计和每把 key 的余量（只给 key 的标签，不给 key 本身） |
+  | `GET /v1/user/api-key`、`POST /v1/user/api-key/refresh` | 查看 / 更换自己的 API key，旧 key 立刻失效 |
+  | `PUT /v1/user/password` | 改密码，body 是 `{"current_password": "…", "new_password": "…"}`，至少 8 位 |
+  | `GET /v1/user/config` | 用户该填的 Base URL（公网地址） |
+
+  管理接口（`/admin/…`）只认网页登录的会话，不接受 API key。
 
 - **key 池**：一直用优先级最高的那把 key，出问题才换。这样上游的提示缓存不会因为换账号而失效。出问题的 key 会冷却一段时间：
 

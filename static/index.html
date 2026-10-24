@@ -19,8 +19,8 @@ button { padding: 10px 20px; border: none; border-radius: 6px; background: #2563
 button:hover { background: #1d4ed8; }
 .secondary { background: #333; }
 .secondary:hover { background: #444; }
-code { background: #111; padding: 2px 6px; border-radius: 4px; font-size: 13px; color: #e0e0e0; }
-pre { background: #111; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; margin: 8px 0; position: relative; }
+code { background: #111; padding: 2px 6px; border-radius: 4px; font-size: 13px; color: #e0e0e0; overflow-wrap: anywhere; }
+pre { background: #111; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; position: relative; }
 .hidden { display: none; }
 .key-display { display: flex; align-items: center; gap: 8px; }
 .key-display code { flex: 1; padding: 10px; font-size: 14px; }
@@ -33,7 +33,7 @@ pre { background: #111; padding: 12px; border-radius: 6px; overflow-x: auto; fon
 .tab.active { background: #2563eb; color: #fff; }
 .step { display: flex; gap: 12px; margin-bottom: 16px; }
 .step-num { background: #2563eb; color: #fff; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; flex-shrink: 0; margin-top: 2px; }
-.step-content { flex: 1; }
+.step-content { flex: 1; min-width: 0; }
 .step-content p { margin-bottom: 4px; }
 .copy-btn { position: absolute; top: 6px; right: 6px; padding: 4px 10px; font-size: 11px; background: #333; border: none; border-radius: 4px; color: #aaa; cursor: pointer; }
 .copy-btn:hover { background: #444; color: #fff; }
@@ -160,8 +160,24 @@ a:hover { text-decoration: underline; }
 
   <!-- Usage -->
   <div class="card">
-    <h2>Today's Usage</h2>
+    <h2>用量</h2>
+    <div style="display:flex;gap:4px;margin-bottom:12px">
+      <button class="tab active" data-period="day" onclick="loadUsage('day')">今天</button>
+      <button class="tab" data-period="month" onclick="loadUsage('month')">本月</button>
+      <button class="tab" data-period="year" onclick="loadUsage('year')">今年</button>
+    </div>
+    <p id="usage-total" style="color:#888;font-size:13px"></p>
+    <div id="usage-chart" style="margin:8px 0 12px"></div>
     <table class="config-table" id="usage-table">
+      <tr><td>Loading...</td><td></td></tr>
+    </table>
+  </div>
+
+  <!-- Personal limits -->
+  <div class="card">
+    <h2>我的限额</h2>
+    <p>按滚动窗口计算：比如"5 小时"指最近 5 小时内的用量。</p>
+    <table class="config-table" id="limits-table">
       <tr><td>Loading...</td><td></td></tr>
     </table>
   </div>
@@ -169,7 +185,7 @@ a:hover { text-decoration: underline; }
   <!-- Pool quota -->
   <div class="card">
     <h2>号池余量</h2>
-    <p>所有用户共用这些套餐，数字是整个号池还剩多少。API 也能查：<code>GET <span class="base-url"></span>/v1/quota</code>（带 API Key）。</p>
+    <p>所有用户共用这些套餐，数字是整个号池还剩多少。个人限额和号池余量用 API 也能查：<code>GET <span class="base-url"></span>/v1/quota</code>（带 API Key）。</p>
     <table class="config-table" id="quota-table">
       <tr><td>Loading...</td><td></td></tr>
     </table>
@@ -237,6 +253,14 @@ a:hover { text-decoration: underline; }
     <h3>API Key 安全吗？</h3>
     <p>你的 Key 只用于本服务的身份验证，不会被发送到任何上游服务商。请妥善保管，不要分享给他人。</p>
 
+    <h3>网页上的功能能用 API 调吗？</h3>
+    <p>都可以，带上 API Key（<code>Authorization: Bearer sk-…</code>）即可：</p>
+    <p>&bull; <code>GET /v1/user/usage?period=day|month|year&amp;tz=480</code> — 用量（按小时/天/月分桶，<code>tz</code> 是时区偏移分钟数）</p>
+    <p>&bull; <code>GET /v1/quota</code> — 个人限额和号池余量</p>
+    <p>&bull; <code>GET /v1/user/api-key</code>，<code>POST /v1/user/api-key/refresh</code> — 查看 / 更换 API Key（旧 Key 立刻失效）</p>
+    <p>&bull; <code>PUT /v1/user/password</code> — 改密码，body：<code>{"current_password": "…", "new_password": "…"}</code></p>
+    <p>&bull; <code>GET /v1/user/config</code> — 应该填的 Base URL</p>
+
     <h3>遇到问题？</h3>
     <p>请联系本服务的管理员。</p>
   </div>
@@ -248,6 +272,7 @@ a:hover { text-decoration: underline; }
 </div>
 </div>
 
+<script src="/usage-chart.js"></script>
 <script>
 // Requests go to this page's own origin; what users configure is SHOW, the public address when set
 const BASE = location.origin;
@@ -353,33 +378,40 @@ async function loadDashboard() {
     document.getElementById('cfg-lan').textContent = BASE;
     document.getElementById('cfg-key').textContent = apiKey;
 
-    // Load usage
-    try {
-      const usageData = await api('/user/usage');
-      const ut = document.getElementById('usage-table');
-      if (usageData.length === 0) {
-        ut.innerHTML = '<tr><td style="color:#666">No usage today</td><td></td></tr>';
-      } else {
-        let totalReq = 0, totalTok = 0;
-        ut.innerHTML = '<tr><th style="color:#888;font-weight:600">Model</th><th style="color:#888;font-weight:600">Requests / Tokens</th></tr>' +
-          usageData.map(u => { totalReq += u.requests; totalTok += u.total_tokens; return `<tr><td>${esc(u.model)}</td><td>${u.requests} req / ${u.total_tokens} tok</td></tr>`; }).join('') +
-          `<tr style="border-top:2px solid #333"><td><strong>Total</strong></td><td><strong>${totalReq} req / ${totalTok} tok</strong></td></tr>`;
-      }
-    } catch(e) {}
+    loadUsage(usagePeriod);
 
     // Pool quota: "5h 62% left · resets 18:00"
     try {
       const q = await api('/user/quota');
+      const lt = document.getElementById('limits-table');
+      if (!q.limits.length) {
+        lt.innerHTML = '<tr><td>所有模型</td><td style="color:#4ade80">不限量</td></tr>';
+      } else {
+        lt.innerHTML = q.limits.map(l => {
+          const model = l.model === '*' ? '所有模型' : esc(l.model);
+          if (l.max_requests === 0 || l.max_tokens === 0) return `<tr><td>${model}</td><td style="color:#f87171">不可用</td></tr>`;
+          const parts = [];
+          if (l.max_tokens > 0) parts.push(meter(l.used.total_tokens, l.max_tokens, 'token'));
+          if (l.max_requests > 0) parts.push(meter(l.used.requests, l.max_requests, '次'));
+          return `<tr><td>${model}<br><span style="color:#666">${windowLabel(l.window_secs)}</span></td><td>${parts.join('<br>') || '<span style="color:#4ade80">不限量</span>'}</td></tr>`;
+        }).join('');
+      }
+
       const qt = document.getElementById('quota-table');
       if (!q.providers.length) {
         qt.innerHTML = '<tr><td style="color:#666">上游没有提供余量信息</td><td></td></tr>';
       } else {
-        qt.innerHTML = q.providers.map(p => `<tr><td>${esc(p.provider)}</td><td>${p.windows.map(w => {
+        const windows = ws => ws.map(w => {
           const left = Math.round(w.remaining_percent);
           const color = left <= 20 ? '#f87171' : left <= 50 ? '#fbbf24' : '#4ade80';
           const reset = w.resets_at ? ` <span style="color:#666">· ${new Date(w.resets_at * 1000).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} 重置</span>` : '';
           return `<span style="color:#888">${esc(w.label)}</span> <span style="color:${color}">剩 ${left}%</span>${reset}`;
-        }).join('<br>')}</td></tr>`).join('');
+        }).join('<br>');
+        // Each provider's total, then its keys one by one
+        qt.innerHTML = q.providers.map(p =>
+          `<tr><td><strong style="color:#e0e0e0">${esc(p.provider)}</strong><br><span style="color:#666">合计</span></td><td>${windows(p.windows)}</td></tr>` +
+          p.keys.map(k => `<tr><td style="padding-left:22px">${esc(k.label)}</td><td>${windows(k.windows)}</td></tr>`).join('')
+        ).join('');
       }
     } catch(e) {}
 
@@ -510,6 +542,44 @@ async function refreshKey() {
   apiKey = res.api_key;
   document.getElementById('api-key-display').textContent = apiKey;
   loadDashboard();
+}
+
+// Usage for today / this month / this year, in this browser's time zone
+let usagePeriod = 'day';
+const PERIOD_NAMES = { day: '今天', month: '本月', year: '今年' };
+async function loadUsage(period) {
+  usagePeriod = period;
+  document.querySelectorAll('[data-period]').forEach(b => b.classList.toggle('active', b.dataset.period === period));
+  try {
+    const u = await api(`/user/usage?period=${period}&tz=${-new Date().getTimezoneOffset()}`);
+    const total = UsageChart.render(document.getElementById('usage-chart'), u.series, period);
+    document.getElementById('usage-total').textContent = `${PERIOD_NAMES[period]}共 ${total.tokens.toLocaleString()} token · ${total.requests.toLocaleString()} 次请求`;
+    const ut = document.getElementById('usage-table');
+    ut.innerHTML = u.models.length
+      ? '<tr><td style="color:#888;font-weight:600">模型</td><td style="color:#888;font-weight:600">请求 / Token</td></tr>' +
+        u.models.map(m => `<tr><td>${esc(m.model)}</td><td>${m.requests.toLocaleString()} 次 / ${m.total_tokens.toLocaleString()} token</td></tr>`).join('')
+      : `<tr><td style="color:#666">${PERIOD_NAMES[period]}还没有用量</td><td></td></tr>`;
+  } catch (e) {}
+}
+
+// 220000000 -> "2.2 亿"
+function bigNum(n) {
+  if (n >= 1e8) return +(n / 1e8).toFixed(2) + ' 亿';
+  if (n >= 1e4) return +(n / 1e4).toFixed(1) + ' 万';
+  return String(n);
+}
+
+function windowLabel(secs) {
+  if (secs % 86400 === 0) return `近 ${secs / 86400} 天`;
+  if (secs % 3600 === 0) return `近 ${secs / 3600} 小时`;
+  return `近 ${Math.round(secs / 60)} 分钟`;
+}
+
+// "已用 3000 万 / 2.2 亿 token（剩 86%）"
+function meter(used, max, unit) {
+  const left = Math.max(0, Math.round((1 - used / max) * 100));
+  const color = left <= 20 ? '#f87171' : left <= 50 ? '#fbbf24' : '#4ade80';
+  return `已用 ${bigNum(used)} / ${bigNum(max)} ${unit} <span style="color:${color}">（剩 ${left}%）</span>`;
 }
 
 async function changePassword() {

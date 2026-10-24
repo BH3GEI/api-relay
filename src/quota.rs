@@ -51,18 +51,33 @@ pub struct PoolWindow {
 #[derive(Serialize)]
 pub struct PoolQuota {
     pub provider: String,
+    /// The provider's keys taken together
+    pub windows: Vec<PoolWindow>,
+    pub keys: Vec<KeyQuota>,
+}
+
+/// One key as users see it: its label, never the key itself.
+#[derive(Serialize)]
+pub struct KeyQuota {
+    pub label: String,
     pub windows: Vec<PoolWindow>,
 }
 
-/// What's left of each enabled provider's plan across its enabled keys. Users get the
-/// pool as a whole, not its keys; providers whose upstream doesn't report quota are left out.
+/// What's left of each enabled provider's plan, per enabled key and in total.
+/// Providers whose upstream doesn't report quota are left out.
 pub async fn pool(state: &AppState) -> Vec<PoolQuota> {
     let Ok(providers) = db::list_enabled_providers(&state.db).await else { return Vec::new() };
     let per_provider = futures::future::join_all(providers.iter().map(|p| async move {
         let keys = db::get_provider_keys(&state.db, p.id).await.unwrap_or_default();
         let quotas = futures::future::join_all(keys.iter().map(|k| state.quota.get(state, p, &k.api_key))).await;
-        let windows = summarize(&quotas.into_iter().flatten().collect::<Vec<_>>());
-        (!windows.is_empty()).then(|| PoolQuota { provider: p.name.clone(), windows })
+        let reported: Vec<(&db::ProviderKey, Vec<Window>)> = keys.iter().zip(quotas)
+            .filter_map(|(k, q)| q.map(|q| (k, q))).collect();
+        let windows = summarize(&reported.iter().map(|(_, q)| q.clone()).collect::<Vec<_>>());
+        let keys = reported.iter().map(|(k, q)| KeyQuota {
+            label: if k.label.is_empty() { format!("key {}", k.id) } else { k.label.clone() },
+            windows: summarize(std::slice::from_ref(q)),
+        }).collect();
+        (!windows.is_empty()).then(|| PoolQuota { provider: p.name.clone(), windows, keys })
     })).await;
     per_provider.into_iter().flatten().collect()
 }

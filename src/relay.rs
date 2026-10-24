@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::{AppState, db};
 
 // Extract API key from either "Authorization: Bearer xxx" or "x-api-key: xxx"
-fn extract_api_key(headers: &HeaderMap) -> Option<String> {
+pub fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     // Try Bearer token first
     if let Some(key) = crate::auth::extract_bearer(headers) {
         return Some(key);
