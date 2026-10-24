@@ -22,6 +22,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "futures",
+ "http-body-util",
  "jsonwebtoken",
  "rand 0.8.5",
  "reqwest",
@@ -29,6 +30,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tower",
  "tower-http 0.5.2",
  "uuid",
 ]

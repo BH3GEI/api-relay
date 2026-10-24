@@ -48,10 +48,10 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
-    pub fn new(binary: Option<String>, public_addr: Option<&str>) -> Self {
+    pub fn new(binary: Option<String>, public_addr: Option<&str>, history: Option<std::path::PathBuf>) -> Self {
         let binary = binary.filter(|b| public_addr.is_some() && std::path::Path::new(b).exists());
         Tunnel {
-            history: std::env::var_os("TUNNEL_LOG").map(Into::into),
+            history,
             origin: format!("http://{}", public_addr.unwrap_or_default()),
             status: Mutex::new(TunnelStatus {
                 available: binary.is_some(),
