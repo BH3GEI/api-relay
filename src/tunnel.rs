@@ -33,8 +33,9 @@ const NOT_READY_LIMIT: Duration = Duration::from_secs(60);
 const ROTATE_EVERY: Duration = Duration::from_secs(10 * 60);
 /// How long the new cloudflared has to connect before the rotation is abandoned
 const ROTATE_TIMEOUT: Duration = Duration::from_secs(60);
-/// Time the old cloudflared gets to finish requests in flight, such as long streamed replies
-const DRAIN: Duration = Duration::from_secs(10 * 60);
+/// Time the old cloudflared gets to finish requests in flight, such as long streamed replies;
+/// cloudflared refuses a grace period over 3 minutes
+const DRAIN: Duration = Duration::from_secs(3 * 60);
 
 #[derive(Clone, Serialize)]
 pub struct TunnelStatus {
