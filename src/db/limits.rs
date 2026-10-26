@@ -1,4 +1,5 @@
-//! Caps on what a user may use: requests and/or tokens over a rolling window, for one model or all.
+//! Caps on what a user may use: requests and/or tokens over a rolling window, for one model,
+//! every model of a provider (`kimi/*`), or all models (`*`).
 
 use serde::Serialize;
 
@@ -8,6 +9,11 @@ use super::{Db, usage};
 pub const UNLIMITED: i64 = -1;
 /// Applies to every model.
 pub const ALL_MODELS: &str = "*";
+
+/// The limit pattern covering every model of `model`'s provider: `kimi/k3` → `kimi/*`.
+pub fn provider_pattern(model: &str) -> Option<String> {
+    model.split_once('/').map(|(provider, _)| format!("{provider}/*"))
+}
 
 #[derive(Serialize, sqlx::FromRow)]
 pub struct Limit {
@@ -32,8 +38,8 @@ impl Limit {
 /// Whether the user may make one more request to `model` under every limit that applies.
 /// No limits means unlimited.
 pub async fn allows(db: &Db, user_id: i64, model: &str) -> sqlx::Result<bool> {
-    let limits: Vec<Limit> = sqlx::query_as(&format!("SELECT {COLUMNS} FROM usage_limits WHERE user_id = ? AND (model = ? OR model = ?)"))
-        .bind(user_id).bind(model).bind(ALL_MODELS).fetch_all(db).await?;
+    let limits: Vec<Limit> = sqlx::query_as(&format!("SELECT {COLUMNS} FROM usage_limits WHERE user_id = ? AND model IN (?, ?, ?)"))
+        .bind(user_id).bind(model).bind(ALL_MODELS).bind(provider_pattern(model)).fetch_all(db).await?;
     for limit in &limits {
         if !limit.allows(&usage::in_window(db, user_id, &limit.model, limit.window_secs).await?) {
             return Ok(false);
@@ -77,5 +83,11 @@ mod tests {
         assert!(limit(2, UNLIMITED).allows(&used(1, 0)));
         assert!(!limit(2, UNLIMITED).allows(&used(2, 0)));
         assert!(!limit(UNLIMITED, 20).allows(&used(1, 30)));
+    }
+
+    #[test]
+    fn provider_patterns() {
+        assert_eq!(provider_pattern("mac/qwen3.8-27b").as_deref(), Some("mac/*"));
+        assert_eq!(provider_pattern("bare"), None);
     }
 }

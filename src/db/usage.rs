@@ -29,11 +29,13 @@ pub struct Totals {
     pub total_tokens: i64,
 }
 
-/// A user's usage over the last `window_secs`, for one model or all (`*`).
+/// A user's usage over the last `window_secs`, for one model, a provider's (`kimi/*`) or all (`*`).
 pub async fn in_window(db: &Db, user_id: i64, model: &str, window_secs: i64) -> sqlx::Result<Totals> {
+    // `kimi/*` matches on the `kimi/` prefix, compared as a string so `_` and `%` stay literal
     sqlx::query_as(
         "SELECT COUNT(*) AS requests, COALESCE(SUM(input_tokens + output_tokens), 0) AS total_tokens
-         FROM usage_logs WHERE user_id = ?1 AND (?2 = '*' OR model = ?2) AND created_at >= datetime('now', ?3)"
+         FROM usage_logs WHERE user_id = ?1 AND created_at >= datetime('now', ?3) AND (?2 = '*' OR model = ?2
+           OR (?2 LIKE '%/*' AND substr(model, 1, length(?2) - 1) = substr(?2, 1, length(?2) - 1)))"
     ).bind(user_id).bind(model).bind(format!("-{window_secs} seconds")).fetch_one(db).await
 }
 

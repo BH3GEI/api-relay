@@ -183,7 +183,7 @@ async function createLimit() {
       max_tokens: limitValue('lim-tok')
     })});
   } catch (e) {
-    alert('Could not set the limit. The model must be a full id from the Models tab (e.g. kimi/k3), or * for all.');
+    alert('Could not set the limit. The model must be a full id from the Models tab (e.g. kimi/k3), a provider followed by /* (e.g. kimi/*), or * for all.');
   }
   loadLimits();
 }

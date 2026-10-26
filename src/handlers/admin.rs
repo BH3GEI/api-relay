@@ -162,8 +162,12 @@ pub struct NewLimit {
 
 pub async fn set_limit(State(state): St, _: Admin, Json(req): Json<NewLimit>) -> Result<Json<limits::Limit>> {
     let model = req.model.as_deref().unwrap_or(limits::ALL_MODELS);
-    // A limit on a name that isn't a catalog id would silently never match
-    if model != limits::ALL_MODELS && !state.catalog.has(model) {
+    // A limit on a name that isn't a catalog id or a provider would silently never match
+    let known = match model.strip_suffix("/*") {
+        Some(provider) => db::providers::list(&state.db).await?.iter().any(|p| p.name == provider),
+        None => model == limits::ALL_MODELS || state.catalog.has(model),
+    };
+    if !known {
         return Err(StatusCode::UNPROCESSABLE_ENTITY.into());
     }
     let window = req.window_secs.unwrap_or(86400);

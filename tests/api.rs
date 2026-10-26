@@ -412,6 +412,23 @@ async fn limits_stop_requests_and_show_on_the_quota() {
 }
 
 #[tokio::test]
+async fn a_provider_limit_covers_all_its_models() {
+    let r = Relay::start().await;
+    r.provider("fake", &["good"]).await;
+    let (id, key) = r.user("bob", "bobpassword1").await;
+    let auth = bearer(&key);
+    let h = [("authorization", auth.as_str())];
+    assert_eq!(r.admin("POST", "/admin/limits", Some(json!({ "user_id": id, "model": "nope/*", "max_requests": 0 }))).await.status, StatusCode::UNPROCESSABLE_ENTITY);
+    // Two requests a day across every fake model, whichever one they go to
+    assert_eq!(r.admin("POST", "/admin/limits", Some(json!({ "user_id": id, "model": "fake/*", "max_requests": 2 }))).await.status, StatusCode::OK);
+    for (model, status) in [("fake/m1", StatusCode::OK), ("fake/m2", StatusCode::OK), ("fake/m1", StatusCode::TOO_MANY_REQUESTS), ("fake/m2", StatusCode::TOO_MANY_REQUESTS)] {
+        assert_eq!(r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": model, "messages": [] }))).await.status, status, "{model}");
+    }
+    let limits = r.public("GET", "/v1/quota", &h, None).await.json()["limits"].clone();
+    assert_eq!((limits[0]["model"].clone(), limits[0]["used"]["requests"].clone()), (json!("fake/*"), json!(2)));
+}
+
+#[tokio::test]
 async fn files_are_for_admins_only() {
     let r = Relay::start().await;
     let (_, key) = r.user("bob", "bobpassword1").await;
