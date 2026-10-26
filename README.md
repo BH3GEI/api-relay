@@ -61,7 +61,7 @@ Rust 单二进制 + SQLite，可以独立运行，也可以打包成懒猫微服
 |---|---|
 | OpenAI Base URL | OpenAI 格式接口的前缀，到 `/v1` 为止。`/chat/completions`、`/responses`、`/models` 接在它后面 |
 | Anthropic Base URL | 可选。`/v1/messages` 接在它后面。不填时用 OpenAI Base URL 去掉末尾的 `/v1` |
-| Extra Models | 可选。上游没有 `/models` 接口时，在这里手动列出模型名，逗号分隔 |
+| Extra Models | 可选。上游没有 `/models` 接口时，在这里手动列出模型名，逗号分隔。写成 `模型名=上下文长度`（如 `glm-5.3=1048576`）可以声明上游没报、或报错了的上下文长度，会出现在 `/v1/models` 的 `context_length` 里；只声明长度的模型如果上游本来就列出，不会重复 |
 | User-Agent | 发给上游的 User-Agent，部分编程套餐会校验 |
 
 几家常见上游的地址：

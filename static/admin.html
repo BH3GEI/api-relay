@@ -54,7 +54,7 @@
       <input id="p-url" placeholder="OpenAI Base URL (…/v1)" style="width:200px">
       <input id="p-aurl" placeholder="Anthropic Base URL (optional)" style="width:200px">
       <input id="p-ua" placeholder="User-Agent" style="width:160px">
-      <input id="p-models" placeholder="Extra models, comma-separated (optional)" style="width:240px">
+      <input id="p-models" placeholder="Extra models, comma-separated; model=context to declare a context length (optional)" title="e.g. glm-5.3=1048576, my-model=131072" style="width:240px">
       <button onclick="createProvider()">Add</button>
     </div>
     <table><thead><tr><th>Name</th><th>Keys</th><th>Endpoints</th><th>Extra Models</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>

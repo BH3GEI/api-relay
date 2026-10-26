@@ -111,9 +111,18 @@ impl Catalog {
                     old.iter().map(|e| (e.upstream_model.clone(), e.meta.clone())).collect()
                 }).unwrap_or_default(),
             };
-            for id in p.models.split(|c: char| c == ',' || c.is_whitespace()).filter(|s| valid_model_id(s)) {
-                if !models.iter().any(|(m, _)| m == id) {
-                    models.push((id.to_string(), Value::Object(Default::default())));
+            // The admin's list adds models the upstream doesn't list, and `id=context` declares a
+            // context length the upstream doesn't report (or reports wrongly)
+            for (id, context) in extra_models(&p.models) {
+                let i = match models.iter().position(|(m, _)| m == id) {
+                    Some(i) => i,
+                    None => {
+                        models.push((id.to_string(), Value::Object(Default::default())));
+                        models.len() - 1
+                    }
+                };
+                if let (Some(context), Value::Object(meta)) = (context, &mut models[i].1) {
+                    meta.insert("context_length".into(), context.into());
                 }
             }
             entries.extend(models.into_iter().map(|(upstream_model, meta)| Entry {
@@ -155,6 +164,17 @@ async fn fetch_models(state: &AppState, p: &Provider) -> Option<Vec<(String, Val
     Some(listed)
 }
 
+/// A provider's extra models: `m1, m2=262144` → [("m1", None), ("m2", Some(262144))].
+fn extra_models(list: &str) -> Vec<(&str, Option<u64>)> {
+    list.split(|c: char| c == ',' || c.is_whitespace())
+        .filter_map(|item| match item.split_once('=') {
+            Some((id, context)) => Some((id, Some(context.parse().ok()?))),
+            None => Some((item, None)),
+        })
+        .filter(|(id, _)| valid_model_id(id))
+        .collect()
+}
+
 fn valid_model_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128
         && id.chars().all(|c| c.is_ascii_alphanumeric() || "._:/@+-[]".contains(c))
@@ -174,4 +194,14 @@ pub fn spawn_refresher(state: std::sync::Arc<AppState>) {
 pub fn refresh_in_background(state: &std::sync::Arc<AppState>) {
     let state = state.clone();
     tokio::spawn(async move { state.catalog.refresh(&state).await });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_extra_models_with_context_lengths() {
+        assert_eq!(extra_models(" m1, m2=262144\nm3=x ="), [("m1", None), ("m2", Some(262144))]);
+    }
 }

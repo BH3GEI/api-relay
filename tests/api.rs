@@ -245,6 +245,26 @@ async fn models_are_listed_under_provider_names_with_upstream_metadata() {
     assert_eq!(r.public("GET", "/v1/models/fake/nope", &h, None).await.status, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn admins_add_models_and_declare_context_lengths() {
+    let r = Relay::start().await;
+    let id = r.provider("fake", &["good"]).await;
+    let (_, key) = r.user("bob", "bobpassword1").await;
+    let auth = bearer(&key);
+    let h = [("authorization", auth.as_str())];
+    let p = r.admin("PUT", &format!("/admin/providers/{id}"), Some(json!({
+        "name": "fake", "base_url": format!("{}/v1", r.upstream.base), "user_agent": "test-agent", "models": "m1=5000, m3=7000 m4",
+    }))).await;
+    assert_eq!(p.status, StatusCode::OK, "{}", p.text);
+    r.admin("POST", "/admin/catalog/refresh", None).await;
+
+    let list = r.public("GET", "/v1/models", &h, None).await.json();
+    let context = |id: &str| list["data"].as_array().unwrap().iter().find(|m| m["id"] == id).map(|m| m["context_length"].clone());
+    // Declared lengths win over the upstream's; models it doesn't list are added
+    assert_eq!([context("fake/m1"), context("fake/m2"), context("fake/m3"), context("fake/m4")],
+        [Some(json!(5000)), Some(json!(null)), Some(json!(7000)), Some(json!(null))]);
+}
+
 // ── Relaying ──
 
 #[tokio::test]
