@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::sync::Notify;
 
 use crate::{AppState, db};
@@ -17,14 +17,24 @@ const LOG_LINES: usize = 30;
 
 // The watchdog: cloudflared can end up with no edge connection and stay that way, so it is
 // restarted when it reports none for a while, whatever the cause.
-/// cloudflared's metrics server; `/ready` answers 200 while it has a live edge connection.
-/// Off cloudflared's default range (20241–20245), which another cloudflared on the host may hold.
-const METRICS_ADDR: &str = "127.0.0.1:20290";
+/// cloudflared's metrics servers, one per instance so two can run during a rotation; `/ready`
+/// answers 200 while it has a live edge connection. Off cloudflared's default range
+/// (20241–20245), which another cloudflared on the host may hold.
+const METRICS_ADDRS: [&str; 2] = ["127.0.0.1:20290", "127.0.0.1:20291"];
 const CHECK_EVERY: Duration = Duration::from_secs(15);
 /// Time to connect after a start before the watchdog may act
 const STARTUP_GRACE: Duration = Duration::from_secs(60);
 /// How long without a ready connection before cloudflared is restarted
 const NOT_READY_LIMIT: Duration = Duration::from_secs(60);
+
+// Rotation: an edge connection can die without cloudflared noticing — it keeps reporting ready
+// while Cloudflare has no route to it (error 1033) — so cloudflared is replaced on a schedule.
+// The new one connects before the old one is told to stop; the old one drains its requests.
+const ROTATE_EVERY: Duration = Duration::from_secs(10 * 60);
+/// How long the new cloudflared has to connect before the rotation is abandoned
+const ROTATE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Time the old cloudflared gets to finish requests in flight, such as long streamed replies
+const DRAIN: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Serialize)]
 pub struct TunnelStatus {
@@ -115,8 +125,8 @@ const HISTORY_MAX: u64 = 1024 * 1024;
 
 /// Lines worth keeping: the connection's life, not per-request errors.
 fn is_event(line: &str) -> bool {
-    const EVENTS: [&str; 10] = ["Registered tunnel connection", "Unregistered tunnel connection", "Retrying connection",
-        "Connection terminated", "edge discovery", "lookup", "Initial protocol", "cloudflared exited", "watchdog", "failed to start"];
+    const EVENTS: [&str; 11] = ["Registered tunnel connection", "Unregistered tunnel connection", "Retrying connection",
+        "Connection terminated", "edge discovery", "lookup", "Initial protocol", "cloudflared exited", "watchdog", "failed to start", "rotation"];
     !line.contains("failed to serve incoming request") && !line.contains("Unable to reach the origin")
         && (EVENTS.iter().any(|e| line.contains(e)) || line.contains(" ERR ") && line.contains("connIndex"))
 }
@@ -138,10 +148,12 @@ fn now_utc() -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem / 60 % 60, rem % 60)
 }
 
-/// Keep cloudflared running with the configured token; restart it when the token changes or it exits.
+/// Keep cloudflared running with the configured token; restart it when the token changes or it
+/// exits, and replace it every ROTATE_EVERY.
 pub fn spawn(state: Arc<AppState>) {
     let Some(binary) = state.tunnel.binary.clone() else { return };
     tokio::spawn(async move {
+        let mut slot = 0;
         loop {
             let token = db::settings::get(&state.db, db::settings::TUNNEL_TOKEN).await.ok().flatten().unwrap_or_default();
             state.tunnel.status.lock().unwrap().configured = !token.is_empty();
@@ -152,18 +164,7 @@ pub fn spawn(state: Arc<AppState>) {
             }
 
             state.tunnel.set_state("starting");
-            // The token goes in the environment, not argv, so it doesn't show up in process listings.
-            // HTTP/2 rather than QUIC, which is often blocked in mainland China.
-            let child = Command::new(&binary)
-                .args(["tunnel", "--no-autoupdate", "--protocol", "http2", "--metrics", METRICS_ADDR, "run"])
-                .env("TUNNEL_TOKEN", &token)
-                // For tunnels created from the CLI; a tunnel configured in the dashboard uses its own routes
-                .env("TUNNEL_URL", &state.tunnel.origin)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .spawn();
-            let mut child = match child {
+            let mut child = match start(&state, &binary, &token, METRICS_ADDRS[slot]) {
                 Ok(c) => c,
                 Err(e) => {
                     state.tunnel.log(format!("failed to start cloudflared: {e}"));
@@ -173,17 +174,7 @@ pub fn spawn(state: Arc<AppState>) {
                 }
             };
 
-            if let Some(stderr) = child.stderr.take() {
-                let st = state.clone();
-                tokio::spawn(async move {
-                    let mut lines = BufReader::new(stderr).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        st.tunnel.log(line);
-                    }
-                });
-            }
-
-            let started = Instant::now();
+            let mut started = Instant::now();
             let mut last_ready = Instant::now();
             let mut tick = tokio::time::interval(CHECK_EVERY);
             loop {
@@ -200,11 +191,24 @@ pub fn spawn(state: Arc<AppState>) {
                         break;
                     }
                     _ = tick.tick() => {
-                        if let Some(reason) = watchdog(&state, started, &mut last_ready).await {
+                        if let Some(reason) = watchdog(&state, METRICS_ADDRS[slot], started, &mut last_ready).await {
                             state.tunnel.log(format!("watchdog: {reason}; restarting cloudflared"));
                             state.tunnel.set_state("reconnecting");
                             let _ = child.kill().await;
                             break;
+                        }
+                        if started.elapsed() >= ROTATE_EVERY {
+                            let next = 1 - slot;
+                            match rotate(&state, &binary, &token, METRICS_ADDRS[next]).await {
+                                Some(new) => {
+                                    drain(&state, std::mem::replace(&mut child, new));
+                                    slot = next;
+                                    last_ready = Instant::now();
+                                }
+                                None => state.tunnel.log("rotation: new cloudflared did not connect; keeping the current one".into()),
+                            }
+                            // Either way, the next rotation is a full interval away
+                            started = Instant::now();
                         }
                     }
                 }
@@ -213,9 +217,68 @@ pub fn spawn(state: Arc<AppState>) {
     });
 }
 
+/// Start cloudflared with its metrics on `metrics`, its log going to the tunnel's log.
+fn start(state: &Arc<AppState>, binary: &str, token: &str, metrics: &str) -> std::io::Result<Child> {
+    let grace = format!("{}s", DRAIN.as_secs());
+    // The token goes in the environment, not argv, so it doesn't show up in process listings.
+    // HTTP/2 rather than QUIC, which is often blocked in mainland China.
+    let mut child = Command::new(binary)
+        .args(["tunnel", "--no-autoupdate", "--protocol", "http2", "--metrics", metrics, "--grace-period", &grace, "run"])
+        .env("TUNNEL_TOKEN", token)
+        // For tunnels created from the CLI; a tunnel configured in the dashboard uses its own routes
+        .env("TUNNEL_URL", &state.tunnel.origin)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    if let Some(stderr) = child.stderr.take() {
+        let st = state.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                st.tunnel.log(line);
+            }
+        });
+    }
+    Ok(child)
+}
+
+/// Start the replacement and wait for it to connect; on failure it is stopped and `None` returned.
+async fn rotate(state: &Arc<AppState>, binary: &str, token: &str, metrics: &str) -> Option<Child> {
+    state.tunnel.log("rotation: starting a new cloudflared".into());
+    let mut new = start(state, binary, token, metrics).ok()?;
+    let deadline = Instant::now() + ROTATE_TIMEOUT;
+    while Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if new.try_wait().ok().flatten().is_some() {
+            return None;
+        }
+        if ready(state, metrics).await {
+            return Some(new);
+        }
+    }
+    let _ = new.kill().await;
+    None
+}
+
+/// Ask the old cloudflared to stop. It stops taking requests at once and finishes those in
+/// flight within its grace period; it is killed if it outlasts that.
+fn drain(state: &Arc<AppState>, mut old: Child) {
+    if let Some(pid) = old.id() {
+        let _ = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    }
+    let st = state.clone();
+    tokio::spawn(async move {
+        if tokio::time::timeout(DRAIN + Duration::from_secs(30), old.wait()).await.is_err() {
+            let _ = old.kill().await;
+        }
+        st.tunnel.log("rotation: old cloudflared stopped".into());
+    });
+}
+
 /// Why cloudflared should be restarted, if it should.
-async fn watchdog(state: &AppState, started: Instant, last_ready: &mut Instant) -> Option<String> {
-    if ready(state).await {
+async fn watchdog(state: &AppState, metrics: &str, started: Instant, last_ready: &mut Instant) -> Option<String> {
+    if ready(state, metrics).await {
         *last_ready = Instant::now();
         state.tunnel.set_state("connected");
     } else if started.elapsed() > STARTUP_GRACE {
@@ -227,8 +290,8 @@ async fn watchdog(state: &AppState, started: Instant, last_ready: &mut Instant) 
     None
 }
 
-async fn ready(state: &AppState) -> bool {
-    state.http_client.get(format!("http://{METRICS_ADDR}/ready"))
+async fn ready(state: &AppState, metrics: &str) -> bool {
+    state.http_client.get(format!("http://{metrics}/ready"))
         .timeout(Duration::from_secs(5))
         .send().await
         .is_ok_and(|r| r.status().is_success())

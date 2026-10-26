@@ -157,7 +157,7 @@ lzc-cli app install ./bh3gei.lzcapp.api-relay-v*.lpk
 
 隧道只连到 relay 的公网专用端口（`PUBLIC_BIND_ADDR`，懒猫包里是 `127.0.0.1:3001`）。这个端口提供 `/v1/…` 接口和首页：用户在首页用用户名和密码登录，查看自己的 key 和用量、修改密码。密码由管理员在管理后台的 Users 页设置（Set Password）。管理后台和懒猫登录（`/auth/sso`）不在公网端口上：懒猫登录信任网关注入的身份头，绕过网关就能被伪造。反过来，懒猫内网那边只用懒猫登录，不接受密码登录。公网端口的防暴力破解按 Cloudflare 的 `CF-Connecting-IP` 计算。
 
-`cloudflared` 随懒猫包一起打包（版本和校验值固定在 `lazycat/build.sh` 里），由 relay 启动和管理，token 通过环境变量传入，不出现在进程参数里。cloudflared 进程退出会被重新拉起；进程还在、但连续一分钟报告没有可用的边缘连接（`/ready`），也会被重启。连接、断开、重试和重启都记在 `TUNNEL_LOG`（懒猫包里是 `/lzcapp/var/tunnel.log`），升级换了容器也还在。
+`cloudflared` 随懒猫包一起打包（版本和校验值固定在 `lazycat/build.sh` 里），由 relay 启动和管理，token 通过环境变量传入，不出现在进程参数里。cloudflared 进程退出会被重新拉起；进程还在、但连续一分钟报告没有可用的边缘连接（`/ready`），也会被重启。连接在 Cloudflare 那头断了、cloudflared 自己却没发现时（公网报 1033），它仍会报告就绪，所以 relay 每 10 分钟换一个 cloudflared：新的连上之后旧的才停，旧的会把正在进行的请求处理完（最多 10 分钟）再退出，新的连不上就保留旧的。连接、断开、重试和重启都记在 `TUNNEL_LOG`（懒猫包里是 `/lzcapp/var/tunnel.log`），升级换了容器也还在。
 
 ### 独立运行
 
