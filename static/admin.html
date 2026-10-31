@@ -115,6 +115,29 @@
       <span id="public-url-msg" style="font-size:13px;color:#888"></span>
     </div>
     <pre id="tunnel-log" style="background:#111;border:1px solid #333;border-radius:6px;padding:10px;font-size:11px;max-height:300px;overflow:auto;white-space:pre-wrap;color:#aaa"></pre>
+
+    <h2 style="margin-top:28px">Public Access (frp)</h2>
+    <p style="color:#888;font-size:13px;line-height:1.6">
+      A second way in, through your own frp server; works alongside the tunnel.
+      The relay serves HTTPS itself with a Let's Encrypt certificate for the domain, proven by a DNS record it adds in Cloudflare.<br>
+      The domain must resolve to the frp server, not through Cloudflare's proxy. The Cloudflare token needs Zone → DNS → Edit on the domain's zone.
+      Secret fields left empty keep their saved values.
+    </p>
+    <div id="frp-unavailable" class="msg error hidden">This build has no frpc or no frp listener.</div>
+    <div style="margin:12px 0;display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px;max-width:840px">
+      <input id="frp-server" placeholder="frp server, e.g. frp.example.com:7000">
+      <input id="frp-token" type="password" placeholder="frp token" autocomplete="off">
+      <input id="frp-port" type="number" min="1" max="65535" placeholder="Remote port, e.g. 40939">
+      <input id="frp-domain" placeholder="Domain, e.g. frp.example.com">
+      <input id="frp-dns-token" type="password" placeholder="Cloudflare DNS API token" autocomplete="off">
+    </div>
+    <div style="margin:12px 0">
+      <button onclick="saveFrp()">Save &amp; connect</button>
+      <button class="btn-danger" onclick="disableFrp()">Turn off</button>
+      <span id="frp-msg" style="font-size:13px;color:#888"></span>
+    </div>
+    <p>Status: <strong id="frp-state">-</strong> · Certificate: <strong id="frp-cert">-</strong> · <span id="frp-url"></span></p>
+    <pre id="frp-log" style="background:#111;border:1px solid #333;border-radius:6px;padding:10px;font-size:11px;max-height:300px;overflow:auto;white-space:pre-wrap;color:#aaa"></pre>
   </div>
 
   <!-- Limits -->

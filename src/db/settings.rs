@@ -4,6 +4,12 @@ use super::Db;
 
 pub const PUBLIC_URL: &str = "public_url";
 pub const TUNNEL_TOKEN: &str = "cloudflare_tunnel_token";
+/// frp settings (`frp::FrpSettings`) as JSON
+pub const FRP: &str = "frp";
+/// The frp listener's certificate and key, and the domain it is for, as JSON
+pub const FRP_CERT: &str = "frp_certificate";
+/// Let's Encrypt account credentials
+pub const ACME_ACCOUNT: &str = "acme_account";
 const JWT_SECRET: &str = "jwt_secret";
 
 pub async fn get(db: &Db, key: &str) -> sqlx::Result<Option<String>> {

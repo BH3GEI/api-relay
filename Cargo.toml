@@ -17,6 +17,17 @@ tower-http = { version = "0.5", features = ["cors", "limit"] }
 axum-extra = { version = "0.9", features = ["typed-header"] }
 futures = "0.3"
 rand = "0.8"
+instant-acme = { version = "0.8", default-features = false, features = ["ring", "rcgen"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
+tower = { version = "0.5", features = ["util"] }
+http = "1"
+bytes = "1"
+http-body-util = "0.1"
+x509-parser = "0.18"
 
 [profile.release]
 strip = true

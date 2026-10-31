@@ -159,6 +159,18 @@ lzc-cli app install ./bh3gei.lzcapp.api-relay-v*.lpk
 
 `cloudflared` 随懒猫包一起打包（版本和校验值固定在 `lazycat/build.sh` 里），由 relay 启动和管理，token 通过环境变量传入，不出现在进程参数里。cloudflared 进程退出会被重新拉起；进程还在、但连续一分钟报告没有可用的边缘连接（`/ready`），也会被重启。连接在 Cloudflare 那头断了、cloudflared 自己却没发现时（公网报 1033），它仍会报告就绪，所以 relay 每 10 分钟换一个 cloudflared：新的连上之后旧的才停，旧的会把正在进行的请求处理完（最多 3 分钟，cloudflared 不接受更长）再退出，新的连不上就保留旧的。连接、断开、重试和重启都记在 `TUNNEL_LOG`（懒猫包里是 `/lzcapp/var/tunnel.log`），升级换了容器也还在。
 
+### frp（第二个公网入口）
+
+Cloudflare Tunnel 偶尔会断。有自己的 frp 服务器的话，可以再开一个入口，两个同时可用，客户端一个连不上就换另一个。
+
+frp 只转发 TCP，所以由 relay 自己提供 HTTPS：它用 Let's Encrypt 为一个指向 frp 服务器的域名申请证书，用 DNS 验证（在 Cloudflare 里临时加一条 TXT 记录），到期前 30 天自动续期。frp 服务器一般只开放高位端口，用不了需要 80 端口的验证方式。
+
+1. 让一个域名（如 `frp.example.com`）直接解析到 frp 服务器，不要开 Cloudflare 代理（橙色云朵）。
+2. 在 Cloudflare 创建 API token：模板 Edit zone DNS，Zone Resources 选这个域名所在的 zone。
+3. 在管理后台 Public Access 页的 frp 部分填 frp 服务器（`host:port`）、frp token、远端端口、域名和 Cloudflare token，点 Save & connect。
+
+之后用 `https://frp.example.com:<远端端口>/v1` 访问。frpc 连到 relay 的 frp 专用端口（`FRP_BIND_ADDR`，懒猫包里是 `127.0.0.1:3002`），这个端口和公网端口提供一样的内容。frpc 在每个连接前加 PROXY protocol 头，防暴力破解按其中的来源地址计算；客户端发来的 `CF-Connecting-IP` 等请求头在这里不被采信。没有这个头的连接会被拒绝。frpc 退出会被重新拉起，断线由 frpc 自己重连。frp token 通过环境变量传给 frpc，不写进配置文件和进程参数。
+
 ### 独立运行
 
 ```bash
@@ -176,6 +188,8 @@ DATABASE_URL="sqlite:relay.db?mode=rwc" BIND_ADDR=127.0.0.1:3000 ./target/releas
 | `PUBLIC_BIND_ADDR` | 不设 | 公网专用端口，提供 API 和首页（密码登录），给隧道用 |
 | `CLOUDFLARED_PATH` | 不设 | cloudflared 程序路径；同时设了 `PUBLIC_BIND_ADDR` 才会启用 Public Access |
 | `TUNNEL_LOG` | 不设 | 隧道连接事件的日志文件（最多 1 MB） |
+| `FRPC_PATH` | 不设 | frpc 程序路径；同时设了 `FRP_BIND_ADDR` 和 `PUBLIC_BIND_ADDR` 才会启用 frp |
+| `FRP_BIND_ADDR` | 不设 | frp 专用的 HTTPS 端口，frpc 转发到这里 |
 | `LAZYCAT` | 不设 | 设为 `1` 时信任懒猫网关注入的身份头。**只能在懒猫网关后面设置**，否则任何人都能伪造身份 |
 
 对外提供服务时请放在 HTTPS 反向代理后面。
@@ -218,4 +232,4 @@ cargo clippy --all-targets
 
 ## 许可证
 
-MIT，见 [LICENSE](LICENSE)。懒猫包里附带的 cloudflared 使用 Apache-2.0 许可，见 [lazycat/cloudflared.LICENSE](lazycat/cloudflared.LICENSE)。
+MIT，见 [LICENSE](LICENSE)。懒猫包里附带的 cloudflared 和 frpc 都使用 Apache-2.0 许可，见 [lazycat/cloudflared.LICENSE](lazycat/cloudflared.LICENSE) 和包内的 `frpc.LICENSE`。

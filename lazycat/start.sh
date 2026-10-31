@@ -9,4 +9,7 @@ export PUBLIC_BIND_ADDR=127.0.0.1:3001
 export CLOUDFLARED_PATH=/lzcapp/pkg/content/cloudflared
 # Tunnel connects, drops and restarts, kept across upgrades
 export TUNNEL_LOG=/lzcapp/var/tunnel.log
+# frp, a second way in: frpc forwards to this HTTPS listener, which serves what the public one does
+export FRPC_PATH=/lzcapp/pkg/content/frpc
+export FRP_BIND_ADDR=127.0.0.1:3002
 exec /lzcapp/pkg/content/api-relay

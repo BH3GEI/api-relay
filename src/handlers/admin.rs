@@ -10,7 +10,7 @@ use crate::{
     error::{OrNotFound, Result},
     extract::Admin,
     handlers::user::{LimitUse, UsageQuery, with_usage},
-    pool, quota, tunnel,
+    frp, pool, quota, tunnel,
 };
 
 type St = State<Arc<AppState>>;
@@ -201,6 +201,23 @@ pub async fn set_tunnel(State(state): St, _: Admin, Json(req): Json<TunnelToken>
     }
     state.tunnel.set_token(&state, &req.token).await?;
     Ok(Json(state.tunnel.status()))
+}
+
+pub async fn frp(State(state): St, _: Admin) -> Json<frp::FrpStatus> {
+    Json(state.frp.status())
+}
+
+/// Set up frp; secrets left empty keep the saved ones, and an empty server turns it off.
+pub async fn set_frp(State(state): St, _: Admin, Json(req): Json<frp::FrpSettings>) -> Result<Json<frp::FrpStatus>> {
+    if !state.frp.status().available {
+        return Err(StatusCode::NOT_IMPLEMENTED.into());
+    }
+    let valid = req.server.is_empty() || req.server.trim().rsplit_once(':').is_some_and(|(h, p)| !h.is_empty() && p.parse::<u16>().is_ok());
+    if !valid {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY.into());
+    }
+    state.frp.set(&state, req).await?;
+    Ok(Json(state.frp.status()))
 }
 
 #[derive(Deserialize)]

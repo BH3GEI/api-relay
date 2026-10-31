@@ -140,6 +140,8 @@ impl Relay {
             lazycat: true,
             cloudflared_path: None,
             tunnel_log: None,
+            frpc_path: None,
+            frp_bind_addr: None,
         };
         let app = App::new(&config).await;
         let upstream = Upstream::start().await;

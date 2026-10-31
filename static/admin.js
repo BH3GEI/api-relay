@@ -290,6 +290,7 @@ async function loadTunnel() {
   el.textContent = st.configured || st.state !== 'off' ? label : 'Not configured';
   el.style.color = color;
   document.getElementById('tunnel-log').textContent = st.log.join('\n');
+  await loadFrp();
   clearTimeout(tunnelTimer);
   if (!document.getElementById('tab-tunnel').classList.contains('hidden')) tunnelTimer = setTimeout(loadTunnel, 3000);
 }
@@ -313,6 +314,54 @@ async function disableTunnel() {
   if (!confirm('Turn off public access?')) return;
   await api('/admin/tunnel', { method: 'PUT', body: JSON.stringify({ token: '' }) });
   loadTunnel();
+}
+
+const CERT_STATES = { none: ['None', '#888'], issuing: ['Requesting…', '#fbbf24'], valid: ['Valid', '#4ade80'], failed: ['Failed (retrying hourly)', '#f87171'] };
+async function loadFrp() {
+  const st = await api('/admin/frp');
+  document.getElementById('frp-unavailable').classList.toggle('hidden', st.available);
+  const fields = { 'frp-server': st.server, 'frp-port': st.remote_port || '', 'frp-domain': st.domain };
+  for (const [id, v] of Object.entries(fields)) {
+    const el = document.getElementById(id);
+    if (!el.dataset.loaded) { el.dataset.loaded = '1'; el.value = v; }
+  }
+  document.getElementById('frp-token').placeholder = st.has_token ? 'frp token (saved)' : 'frp token';
+  document.getElementById('frp-dns-token').placeholder = st.has_dns_token ? 'Cloudflare DNS API token (saved)' : 'Cloudflare DNS API token';
+  const [label, color] = TUNNEL_STATES[st.state] || [st.state, '#888'];
+  const el = document.getElementById('frp-state');
+  el.textContent = st.configured || st.state !== 'off' ? label : 'Not configured';
+  el.style.color = color;
+  const [cl, cc] = CERT_STATES[st.cert] || [st.cert, '#888'];
+  const cert = document.getElementById('frp-cert');
+  cert.textContent = cl + (st.cert === 'valid' && st.cert_expires ? `, until ${new Date(st.cert_expires * 1000).toLocaleDateString()}` : '');
+  cert.style.color = cc;
+  document.getElementById('frp-url').textContent = st.url || '';
+  document.getElementById('frp-log').textContent = st.log.join('\n');
+}
+async function saveFrp() {
+  const msg = document.getElementById('frp-msg');
+  const body = {
+    server: document.getElementById('frp-server').value.trim(),
+    token: document.getElementById('frp-token').value.trim(),
+    remote_port: Number(document.getElementById('frp-port').value) || 0,
+    domain: document.getElementById('frp-domain').value.trim(),
+    dns_token: document.getElementById('frp-dns-token').value.trim(),
+  };
+  try {
+    await api('/admin/frp', { method: 'PUT', body: JSON.stringify(body) });
+    document.getElementById('frp-token').value = '';
+    document.getElementById('frp-dns-token').value = '';
+    msg.textContent = 'Saved.'; msg.style.color = '#4ade80';
+  } catch (e) {
+    msg.textContent = 'The server must be host:port.'; msg.style.color = '#f87171';
+  }
+  loadFrp();
+}
+async function disableFrp() {
+  if (!confirm('Turn off frp?')) return;
+  await api('/admin/frp', { method: 'PUT', body: JSON.stringify({ server: '' }) });
+  document.getElementById('frp-server').value = '';
+  loadFrp();
 }
 
 function logout() {

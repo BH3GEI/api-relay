@@ -37,6 +37,8 @@ async fn the_oldest_layout_is_brought_up_to_date() {
         lazycat: true,
         cloudflared_path: None,
         tunnel_log: None,
+        frpc_path: None,
+        frp_bind_addr: None,
     };
     // Twice: the second start finds the schema current
     for _ in 0..2 {

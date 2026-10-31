@@ -15,6 +15,9 @@ pub struct Config {
     pub cloudflared_path: Option<String>,
     /// Where tunnel connection events are kept across restarts
     pub tunnel_log: Option<PathBuf>,
+    pub frpc_path: Option<String>,
+    /// The HTTPS listener frpc forwards to; serves what the public listener does
+    pub frp_bind_addr: Option<String>,
 }
 
 impl Config {
@@ -28,6 +31,8 @@ impl Config {
             lazycat: var("LAZYCAT").as_deref() == Some("1"),
             cloudflared_path: var("CLOUDFLARED_PATH"),
             tunnel_log: var("TUNNEL_LOG").map(PathBuf::from),
+            frpc_path: var("FRPC_PATH"),
+            frp_bind_addr: var("FRP_BIND_ADDR"),
         }
     }
 }

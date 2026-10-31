@@ -3,14 +3,17 @@
 //! Two listeners. The main one sits behind LazyCat's gateway, which signs users in; it serves
 //! the pages, the admin API and the relayed API. The public one is reached through a Cloudflare
 //! Tunnel around that gateway, so it serves only what is safe without it: the relayed API, and
-//! the home page with password sign-in.
+//! the home page with password sign-in. frp, when set up, is a second way in to the same routes
+//! (see `frp`).
 
+mod acme;
 mod auth;
 mod catalog;
 pub mod config;
 mod db;
 mod error;
 mod extract;
+mod frp;
 mod guard;
 mod handlers;
 mod pages;
@@ -46,6 +49,7 @@ pub struct AppState {
     /// Running as a LazyCat app: trust the identity headers its gateway sets
     lazycat: bool,
     tunnel: tunnel::Tunnel,
+    frp: frp::Frp,
 }
 
 /// The relay, ready to serve: the main router and, when configured, the public one.
@@ -90,6 +94,7 @@ impl App {
             admission: tokio::sync::Mutex::new(()),
             lazycat: config.lazycat,
             tunnel: tunnel::Tunnel::new(config.cloudflared_path.clone(), config.public_bind_addr.as_deref(), config.tunnel_log.clone()),
+            frp: frp::Frp::new(config.frpc_path.clone(), config.frp_bind_addr.clone()),
         });
         catalog::spawn_refresher(state.clone());
         tunnel::spawn(state.clone());
@@ -108,6 +113,7 @@ impl App {
                 .layer(middleware::map_response(security_headers))
                 .with_state(state.clone())
         });
+        frp::spawn(state.clone(), public.clone());
         App { state, lan, public }
     }
 }
@@ -134,6 +140,7 @@ fn lan_routes() -> Routes {
         .route("/admin/limits", get(admin::limits).post(admin::set_limit))
         .route("/admin/limits/:id", delete(admin::delete_limit))
         .route("/admin/tunnel", get(admin::tunnel).put(admin::set_tunnel))
+        .route("/admin/frp", get(admin::frp).put(admin::set_frp))
         .route("/admin/public-url", put(admin::set_public_url))
 }
 

@@ -9,9 +9,9 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::{AppState, auth, db, error::{Error, Result}, guard};
+use crate::{AppState, auth, db, error::{Error, Result}, frp, guard};
 
-/// Marks requests that came in on the public listener (the Cloudflare Tunnel).
+/// Marks requests that came in on the public listener (the Cloudflare Tunnel) or through frp.
 #[derive(Clone, Copy)]
 pub struct PublicListener;
 
@@ -33,7 +33,12 @@ impl Origin {
 
     fn from_parts(parts: &Parts) -> Origin {
         let public = parts.extensions.get::<PublicListener>().is_some();
-        Origin { public, ip: guard::client_ip(&parts.headers, public) }
+        // Through frp the address comes from frpc, never from headers a client could set
+        let ip = match parts.extensions.get::<frp::FrpClient>() {
+            Some(frp::FrpClient(ip)) => ip.clone(),
+            None => guard::client_ip(&parts.headers, public),
+        };
+        Origin { public, ip }
     }
 }
 
