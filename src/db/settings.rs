@@ -10,6 +10,7 @@ pub const FRP: &str = "frp";
 pub const FRP_CERT: &str = "frp_certificate";
 /// Let's Encrypt account credentials
 pub const ACME_ACCOUNT: &str = "acme_account";
+const FORWARD_SECRET: &str = "frp_forward_secret";
 const JWT_SECRET: &str = "jwt_secret";
 
 pub async fn get(db: &Db, key: &str) -> sqlx::Result<Option<String>> {
@@ -35,4 +36,13 @@ pub async fn jwt_secret(db: &Db) -> sqlx::Result<String> {
         .bind(format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple()))
         .execute(db).await?;
     Ok(get(db, JWT_SECRET).await?.unwrap_or_default())
+}
+
+/// The secret a fallback proxy in front of the tunnel proves itself with on the frp listener.
+pub async fn forward_secret(db: &Db) -> sqlx::Result<String> {
+    sqlx::query("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)")
+        .bind(FORWARD_SECRET)
+        .bind(format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple()))
+        .execute(db).await?;
+    Ok(get(db, FORWARD_SECRET).await?.unwrap_or_default())
 }

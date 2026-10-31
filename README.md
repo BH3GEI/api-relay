@@ -169,7 +169,9 @@ frp 只转发 TCP，所以由 relay 自己提供 HTTPS：它用 Let's Encrypt �
 2. 在 Cloudflare 创建 API token：模板 Edit zone DNS，Zone Resources 选这个域名所在的 zone。
 3. 在管理后台 Public Access 页的 frp 部分填 frp 服务器（`host:port`）、frp token、远端端口、域名和 Cloudflare token，点 Save & connect。
 
-之后用 `https://frp.example.com:<远端端口>/v1` 访问。frpc 连到 relay 的 frp 专用端口（`FRP_BIND_ADDR`，懒猫包里是 `127.0.0.1:3002`），这个端口和公网端口提供一样的内容。frpc 在每个连接前加 PROXY protocol 头，防暴力破解按其中的来源地址计算；客户端发来的 `CF-Connecting-IP` 等请求头在这里不被采信。没有这个头的连接会被拒绝。frpc 退出会被重新拉起，断线由 frpc 自己重连。frp token 通过环境变量传给 frpc，不写进配置文件和进程参数。
+之后用 `https://frp.example.com:<远端端口>/v1` 访问。frpc 连到 relay 的 frp 专用端口（`FRP_BIND_ADDR`，懒猫包里是 `127.0.0.1:3002`），这个端口和公网端口提供一样的内容。frpc 在每个连接前加 PROXY protocol 头，防暴力破解按其中的来源地址计算；客户端发来的 `CF-Connecting-IP` 等请求头在这里不被采信。没有这个头的连接会被拒绝。
+
+也可以在 Cloudflare 上放一个 Worker 做自动切换：请求先走隧道，隧道报错（530、502 等）时再转发到 frp 入口，客户端只用一个地址。Worker 从自己的地址连过来，所以它用请求头 `x-relay-client-ip` 告诉 relay 真实来源，并带上 `x-relay-forward-secret`（relay 生成的转发密钥，管理 API `GET /admin/frp` 的 `forward_secret`）证明身份；密钥不对时这两个头被忽略并删掉。Worker 的代码在 [cloudflare/fallback-worker.js](cloudflare/fallback-worker.js)，环境变量 `FALLBACK_URL` 填 frp 地址，`FORWARD_SECRET` 填转发密钥（用 secret 类型），路由设为 `relay.example.com/*`。relay 的每个响应都带 `x-api-relay` 头；Worker 只在拿不到带这个头的响应时（隧道断开的 530、502 或连不上）才改走 frp，所以请求不会被执行两次。走 frp 的响应带 `x-relay-path: frp`。frpc 退出会被重新拉起，断线由 frpc 自己重连。frp token 通过环境变量传给 frpc，不写进配置文件和进程参数。
 
 ### 独立运行
 

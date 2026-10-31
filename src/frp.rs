@@ -4,7 +4,10 @@
 //! frp forwards raw TCP, so the relay terminates TLS itself, with a Let's Encrypt certificate
 //! for a domain pointing at the frp server (see `acme`). frpc puts a PROXY protocol header in
 //! front of each connection, which is where the caller's address comes from: on this listener
-//! nothing a client sends can be trusted for it.
+//! nothing a client sends can be trusted for it. The one exception is a fallback proxy in front
+//! of the tunnel (a Cloudflare Worker that retries here when the tunnel is down): it connects
+//! from its own address, so it names the caller in `x-relay-client-ip` and proves itself with
+//! the relay's forwarding secret in `x-relay-forward-secret`.
 
 use axum::{Router, extract::Request};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -75,6 +78,8 @@ pub struct FrpStatus {
     pub domain: String,
     pub has_token: bool,
     pub has_dns_token: bool,
+    /// What a fallback proxy sends in `x-relay-forward-secret` to name the caller
+    pub forward_secret: String,
     pub log: Vec<String>,
 }
 
@@ -108,6 +113,7 @@ impl Frp {
                 domain: String::new(),
                 has_token: false,
                 has_dns_token: false,
+                forward_secret: String::new(),
                 log: Vec::new(),
             }),
             binary,
@@ -174,13 +180,21 @@ async fn settings(db: &db::Db) -> FrpSettings {
 pub fn spawn(state: Arc<AppState>, public: Option<Router>) {
     let (Some(binary), Some(local), Some(public)) = (state.frp.binary.clone(), state.frp.local.clone(), public) else { return };
     tokio::spawn(certificates(state.clone()));
+    let forward_secret = Arc::new(RwLock::new(String::new()));
     tokio::spawn(frpc(state.clone(), binary, local.clone()));
     tokio::spawn(async move {
         let listener = match TcpListener::bind(&local).await {
             Ok(l) => l,
             Err(e) => return state.frp.log(format!("frp listener on {local}: {e}")),
         };
-        serve(listener, state.frp.certs.clone(), public).await;
+        match db::settings::forward_secret(&state.db).await {
+            Ok(s) => {
+                state.frp.status.lock().unwrap().forward_secret = s.clone();
+                *forward_secret.write().unwrap() = s;
+            }
+            Err(e) => state.frp.log(format!("forwarding secret: {e}")),
+        }
+        serve(listener, state.frp.certs.clone(), forward_secret, public).await;
     });
 }
 
@@ -363,7 +377,7 @@ impl ResolvesServerCert for Certs {
     }
 }
 
-async fn serve(listener: TcpListener, certs: Arc<Certs>, public: Router) {
+async fn serve(listener: TcpListener, certs: Arc<Certs>, forward_secret: Arc<RwLock<String>>, public: Router) {
     let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions().unwrap()
         .with_no_client_auth()
@@ -372,19 +386,32 @@ async fn serve(listener: TcpListener, certs: Arc<Certs>, public: Router) {
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
     loop {
         let Ok((stream, _)) = listener.accept().await else { continue };
-        let (acceptor, router) = (acceptor.clone(), public.clone());
+        let (acceptor, router, secret) = (acceptor.clone(), public.clone(), forward_secret.clone());
         tokio::spawn(async move {
             let Ok(Ok((stream, client))) = tokio::time::timeout(Duration::from_secs(10), proxy_header(stream)).await else { return };
             let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(stream)).await else { return };
-            let client = FrpClient(client);
             let service = hyper::service::service_fn(move |mut req: Request<hyper::body::Incoming>| {
-                req.extensions_mut().insert(client.clone());
+                let caller = forwarded_for(req.headers_mut(), &secret.read().unwrap()).or_else(|| client.clone());
+                req.extensions_mut().insert(FrpClient(caller));
                 router.clone().oneshot(req.map(axum::body::Body::new))
             });
             let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
                 .serve_connection_with_upgrades(TokioIo::new(tls), service).await;
         });
     }
+}
+
+/// The caller a fallback proxy names, if it proves itself; the headers are removed either way.
+fn forwarded_for(headers: &mut axum::http::HeaderMap, secret: &str) -> Option<String> {
+    let sent = headers.remove("x-relay-forward-secret");
+    let ip = headers.remove("x-relay-client-ip");
+    let proven = !secret.is_empty() && sent.is_some_and(|s| constant_time_eq(s.as_bytes(), secret.as_bytes()));
+    let ip = ip?.to_str().ok()?.trim().parse::<std::net::IpAddr>().ok()?;
+    proven.then(|| ip.to_string())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 const PROXY_V2: [u8; 12] = *b"\r\n\r\n\0\r\nQUIT\n";
@@ -449,6 +476,24 @@ mod tests {
         let (good, _) = listener.accept().await.unwrap();
         assert_eq!(proxy_header(good).await.unwrap().1.as_deref(), Some("5.6.7.8"));
         drop(client.await);
+    }
+
+    #[test]
+    fn trusts_the_named_caller_only_with_the_secret() {
+        let headers = |secret: &str| {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert("x-relay-forward-secret", secret.parse().unwrap());
+            h.insert("x-relay-client-ip", "1.2.3.4".parse().unwrap());
+            h
+        };
+        let mut h = headers("s3cret");
+        assert_eq!(forwarded_for(&mut h, "s3cret").as_deref(), Some("1.2.3.4"));
+        assert!(h.is_empty());
+        assert_eq!(forwarded_for(&mut headers("guess"), "s3cret"), None);
+        assert_eq!(forwarded_for(&mut headers(""), ""), None);
+        let mut h = headers("s3cret");
+        h.insert("x-relay-client-ip", "not an ip".parse().unwrap());
+        assert_eq!(forwarded_for(&mut h, "s3cret"), None);
     }
 
     #[test]

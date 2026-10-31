@@ -193,5 +193,8 @@ async fn security_headers(mut resp: Response) -> Response {
     let h = resp.headers_mut();
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    // Tells a fallback proxy in front of the tunnel that this answer came from the relay, so an
+    // error here is the relay's own and not a reason to retry through frp
+    h.insert("x-api-relay", HeaderValue::from_static("1"));
     resp
 }
