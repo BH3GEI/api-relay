@@ -55,6 +55,7 @@
         <p><strong style="color:#e0e0e0">复制你的配置信息</strong></p>
         <table class="config-table">
           <tr><td>API Base URL</td><td id="cfg-base"></td></tr>
+          <tr id="cfg-backup-row" class="hidden"><td>备用地址</td><td><span id="cfg-backup"></span><div style="color:#666;font-size:12px">主地址连不上时，可以把 Base URL 换成这个，API Key 不变。</div></td></tr>
           <tr id="cfg-lan-row" class="hidden"><td>LazyCat 内网地址</td><td id="cfg-lan" style="color:#888"></td></tr>
           <tr><td>API Key</td><td><span id="cfg-key"></span> <button class="copy-btn" style="position:static;margin-left:4px" onclick="copyKey()">Copy</button></td></tr>
         </table>
@@ -121,16 +122,7 @@
   <!-- Usage -->
   <div class="card">
     <h2>用量</h2>
-    <div style="display:flex;gap:4px;margin-bottom:12px">
-      <button class="tab active" data-period="day" onclick="loadUsage('day')">今天</button>
-      <button class="tab" data-period="month" onclick="loadUsage('month')">本月</button>
-      <button class="tab" data-period="year" onclick="loadUsage('year')">今年</button>
-    </div>
-    <p id="usage-total" style="color:#888;font-size:13px"></p>
-    <div id="usage-chart" style="margin:8px 0 12px"></div>
-    <table class="config-table" id="usage-table">
-      <tr><td>Loading...</td><td></td></tr>
-    </table>
+    <div id="usage-view"></div>
   </div>
 
   <!-- Personal limits -->
@@ -215,7 +207,7 @@
 
     <h3>网页上的功能能用 API 调吗？</h3>
     <p>都可以，带上 API Key（<code>Authorization: Bearer sk-…</code>）即可：</p>
-    <p>&bull; <code>GET /v1/user/usage?period=day|month|year&amp;tz=480</code> — 用量（按小时/天/月分桶，<code>tz</code> 是时区偏移分钟数）</p>
+    <p>&bull; <code>GET /v1/user/usage?period=day|week|month|year&amp;tz=480</code> — 用量（按小时/天/月分桶，<code>tz</code> 是时区偏移分钟数）；也可以用 <code>from</code>/<code>to</code>（Unix 秒）指定任意区间，<code>group=model|provider</code> 拆分，<code>model=kimi/*</code> 筛选，<code>step=hour|day|month</code> 指定粒度</p>
     <p>&bull; <code>GET /v1/quota</code> — 个人限额和号池余量</p>
     <p>&bull; <code>GET /v1/user/api-key</code>，<code>POST /v1/user/api-key/refresh</code> — 查看 / 更换 API Key（旧 Key 立刻失效）</p>
     <p>&bull; <code>PUT /v1/user/password</code> — 改密码，body：<code>{"current_password": "…", "new_password": "…"}</code></p>

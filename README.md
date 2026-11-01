@@ -25,7 +25,8 @@ Rust 单二进制 + SQLite，可以独立运行，也可以打包成懒猫微服
 
   | 接口 | 用途 |
   |---|---|
-  | `GET /v1/user/usage?period=day\|month\|year&tz=480` | 今天 / 本月 / 今年的用量，按小时 / 天 / 月分桶，另附按模型的合计；`tz` 是时区偏移（分钟，东八区填 480） |
+  | `GET /v1/user/usage?period=day\|week\|month\|year&tz=480` | 今天 / 本周（周一起）/ 本月 / 今年的用量，分桶给出 `series`，另有 `totals`（输入、输出、合计、请求数）和按模型的 `models`；`tz` 是时区偏移（分钟，东八区填 480） |
+  | `GET /v1/user/usage?from=…&to=…` | 任意区间 `[from, to)`（Unix 秒）。可选：`step=hour\|day\|month`（默认按区间长度选），`group=model\|provider` 拆分，`model=kimi/k3` 或 `kimi/*` 筛选，`compare_from`/`compare_to` 另算一段的合计放进 `previous`。管理端 `/admin/usage` 参数相同，另可 `group=user`、`user=<id>` |
   | `GET /v1/quota`（同 `/v1/user/quota`） | 个人限额（含当前窗口已用量）和号池的上游套餐余量：每个 provider 的合计和每把 key 的余量（只给 key 的标签，不给 key 本身） |
   | `GET /v1/user/api-key`、`POST /v1/user/api-key/refresh` | 查看 / 更换自己的 API key，旧 key 立刻失效 |
   | `PUT /v1/user/password` | 改密码，body 是 `{"current_password": "…", "new_password": "…"}`，至少 8 位 |

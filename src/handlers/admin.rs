@@ -9,7 +9,7 @@ use crate::{
     db::{self, limits, providers::{Provider, ProviderInput, ProviderKey}, users::User},
     error::{OrNotFound, Result},
     extract::Admin,
-    handlers::user::{LimitUse, UsageQuery, with_usage},
+    handlers::user::{self, LimitUse, UsageQuery, with_usage},
     frp, pool, quota, tunnel,
 };
 
@@ -131,16 +131,17 @@ pub async fn refresh_catalog(State(state): St, _: Admin) -> Json<Vec<String>> {
 
 #[derive(Serialize)]
 pub struct Usage {
-    series: Vec<db::usage::Bucket>,
-    rows: Vec<db::usage::UserModelTotals>,
+    #[serde(flatten)]
+    report: user::Report,
+    /// Per user and model, biggest first
+    rows: Vec<db::usage::Row>,
 }
 
-/// Everyone's usage over a period.
+/// Everyone's usage, or one user's.
 pub async fn usage(State(state): St, _: Admin, Query(q): Query<UsageQuery>) -> Result<Json<Usage>> {
-    Ok(Json(Usage {
-        series: db::usage::series(&state.db, None, q.range()).await?,
-        rows: db::usage::by_user_and_model(&state.db, q.range()).await?,
-    }))
+    let mut report = user::report(&state, &q, q.user()).await?;
+    let rows = std::mem::take(&mut report.rows);
+    Ok(Json(Usage { report, rows }))
 }
 
 pub async fn limits(State(state): St, _: Admin) -> Result<Json<Vec<LimitUse>>> {

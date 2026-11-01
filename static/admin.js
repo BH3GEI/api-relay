@@ -131,18 +131,11 @@ async function loadModels() { renderModels(await api('/admin/catalog')); }
 async function refreshModels() { renderModels(await api('/admin/catalog/refresh', { method:'POST' })); }
 
 // Usage
-// All users, for today / this month / this year in this browser's time zone
-let usagePeriod = 'day';
-const PERIOD_NAMES = { day: 'Today', month: 'This month', year: 'This year' };
-async function loadUsage(period = usagePeriod) {
-  usagePeriod = period;
-  document.querySelectorAll('[data-period]').forEach(b => b.classList.toggle('active', b.dataset.period === period));
-  const usage = await api(`/admin/usage?period=${period}&tz=${-new Date().getTimezoneOffset()}`);
-  const total = UsageChart.render(document.getElementById('usage-chart'), usage.series, period);
-  document.getElementById('usage-total').textContent = `${PERIOD_NAMES[period]}: ${total.tokens.toLocaleString()} tokens · ${total.requests.toLocaleString()} requests`;
-  document.getElementById('usage-body').innerHTML = usage.rows.map(u =>
-    `<tr><td>${esc(u.username)}</td><td>${esc(u.model)}</td><td>${u.requests.toLocaleString()}</td><td>${u.total_tokens.toLocaleString()}</td></tr>`
-  ).join('') || `<tr><td colspan="4" style="color:#666">No usage ${PERIOD_NAMES[period].toLowerCase()}</td></tr>`;
+// All users, or one; any range, split and filtered
+let usageView = null;
+function loadUsage() {
+  usageView ||= UsageView.mount(document.getElementById('usage-view'), { lang: 'en', admin: true, fetch: q => api('/admin/usage?' + q) });
+  usageView.load();
 }
 
 // Limits

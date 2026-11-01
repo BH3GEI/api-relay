@@ -83,14 +83,7 @@
   <!-- Usage -->
   <div id="tab-usage" class="card hidden">
     <h2>Usage</h2>
-    <div style="display:flex;gap:4px;margin-bottom:12px">
-      <button class="tab active" data-period="day" onclick="loadUsage('day')">Today</button>
-      <button class="tab" data-period="month" onclick="loadUsage('month')">This month</button>
-      <button class="tab" data-period="year" onclick="loadUsage('year')">This year</button>
-    </div>
-    <p id="usage-total" style="color:#888;font-size:13px"></p>
-    <div id="usage-chart" style="margin:8px 0 12px"></div>
-    <table><thead><tr><th>User</th><th>Model</th><th>Requests</th><th>Tokens</th></tr></thead><tbody id="usage-body"></tbody></table>
+    <div id="usage-view"></div>
   </div>
 
   <!-- Public access -->

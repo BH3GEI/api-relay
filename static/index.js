@@ -72,17 +72,22 @@ async function loadDashboard() {
     const keyRes = await api('/user/api-key');
     apiKey = keyRes.api_key;
     document.getElementById('api-key-display').textContent = apiKey;
+    let backup = null;
     try {
       const cfg = await api('/user/config');
       if (cfg.public_url) SHOW = cfg.public_url;
+      backup = cfg.backup_url;
     } catch (e) {}
+    document.getElementById('cfg-backup-row').classList.toggle('hidden', !backup);
+    document.getElementById('cfg-backup').textContent = backup || '';
     document.querySelectorAll('.base-url').forEach(el => el.textContent = SHOW);
     document.getElementById('cfg-base').textContent = SHOW;
     document.getElementById('cfg-lan-row').classList.toggle('hidden', SHOW === BASE);
     document.getElementById('cfg-lan').textContent = BASE;
     document.getElementById('cfg-key').textContent = apiKey;
 
-    loadUsage(usagePeriod);
+    usageView ||= UsageView.mount(document.getElementById('usage-view'), { lang: 'zh', fetch: q => api('/user/usage?' + q) });
+    usageView.load();
 
     // Pool quota: "5h 62% left · resets 18:00"
     try {
@@ -248,23 +253,7 @@ async function refreshKey() {
   loadDashboard();
 }
 
-// Usage for today / this month / this year, in this browser's time zone
-let usagePeriod = 'day';
-const PERIOD_NAMES = { day: '今天', month: '本月', year: '今年' };
-async function loadUsage(period) {
-  usagePeriod = period;
-  document.querySelectorAll('[data-period]').forEach(b => b.classList.toggle('active', b.dataset.period === period));
-  try {
-    const u = await api(`/user/usage?period=${period}&tz=${-new Date().getTimezoneOffset()}`);
-    const total = UsageChart.render(document.getElementById('usage-chart'), u.series, period);
-    document.getElementById('usage-total').textContent = `${PERIOD_NAMES[period]}共 ${total.tokens.toLocaleString()} token · ${total.requests.toLocaleString()} 次请求`;
-    const ut = document.getElementById('usage-table');
-    ut.innerHTML = u.models.length
-      ? '<tr><td style="color:#888;font-weight:600">模型</td><td style="color:#888;font-weight:600">请求 / Token</td></tr>' +
-        u.models.map(m => `<tr><td>${esc(m.model)}</td><td>${m.requests.toLocaleString()} 次 / ${m.total_tokens.toLocaleString()} token</td></tr>`).join('')
-      : `<tr><td style="color:#666">${PERIOD_NAMES[period]}还没有用量</td><td></td></tr>`;
-  } catch (e) {}
-}
+let usageView = null;
 
 // 220000000 -> "2.2 亿"
 function bigNum(n) {

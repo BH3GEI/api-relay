@@ -38,7 +38,7 @@ async fn pages_reference_their_scripts_by_content_hash() {
         let js = r.lan("GET", &url, &[], None).await;
         assert_eq!(js.status, StatusCode::OK);
         assert!(js.headers["content-type"].to_str().unwrap().contains("javascript"));
-        assert!(js.text.contains("UsageChart"));
+        assert!(js.text.contains("UsageView"));
     }
 }
 
@@ -156,7 +156,7 @@ async fn public_url_is_validated() {
     assert_eq!(r.admin("PUT", "/admin/public-url", Some(json!({ "url": "https://relay.example.com/" }))).await.status, StatusCode::NO_CONTENT);
     let (_, key) = r.user("bob", "bobpassword1").await;
     let cfg = r.public("GET", "/v1/user/config", &[("authorization", &bearer(&key))], None).await.json();
-    assert_eq!(cfg, json!({ "public_url": "https://relay.example.com" }));
+    assert_eq!(cfg, json!({ "public_url": "https://relay.example.com", "backup_url": null }));
 }
 
 #[tokio::test]
@@ -178,18 +178,18 @@ async fn user_features_work_by_session_and_by_key() {
         let auth = bearer(&token);
         let h = [("authorization", auth.as_str())];
         assert_eq!(r.public("GET", &format!("{prefix}/api-key"), &h, None).await.json()["api_key"], key.as_str());
-        assert_eq!(r.public("GET", &format!("{prefix}/config"), &h, None).await.json(), json!({ "public_url": null }));
+        assert_eq!(r.public("GET", &format!("{prefix}/config"), &h, None).await.json(), json!({ "public_url": null, "backup_url": null }));
         let q = r.public("GET", &format!("{prefix}/quota"), &h, None).await.json();
         assert_eq!(q, json!({ "limits": [], "providers": [] }));
         let u = r.public("GET", &format!("{prefix}/usage?period=month&tz=480"), &h, None).await.json();
-        assert_eq!(u, json!({ "series": [], "models": [] }));
+        assert_eq!((&u["series"], &u["models"], &u["totals"]["total_tokens"], &u["previous"]), (&json!([]), &json!([]), &json!(0), &json!(null)));
     }
     assert_eq!(r.public("GET", "/v1/quota", &[("authorization", &bearer(&key))], None).await.json(), json!({ "limits": [], "providers": [] }));
     // x-api-key works like a bearer key
     assert_eq!(r.public("GET", "/v1/user/api-key", &[("x-api-key", &key)], None).await.status, StatusCode::OK);
     assert_eq!(r.public("GET", "/v1/user/usage", &[], None).await.status, StatusCode::UNAUTHORIZED);
     assert_eq!(r.public("GET", "/user/usage", &[("authorization", "Bearer sk-nope")], None).await.status, StatusCode::UNAUTHORIZED);
-    assert_eq!(r.public("GET", "/user/usage?period=week", &[("authorization", &bearer(&session))], None).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.public("GET", "/user/usage?period=decade", &[("authorization", &bearer(&session))], None).await.status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -290,7 +290,7 @@ async fn chat_is_relayed_on_the_first_working_key_and_counted() {
     assert_eq!(auths("/v1/chat/completions"), ["Bearer good", "Bearer good"], "bare upstream ids resolve too");
 
     let usage = r.public("GET", "/v1/user/usage?period=day&tz=0", &h, None).await.json();
-    assert_eq!(usage["models"], json!([{ "model": "fake/m1", "requests": 2, "total_tokens": 30 }]));
+    assert_eq!(brief(&usage["models"]), json!([{ "model": "fake/m1", "requests": 2, "total_tokens": 30 }]));
 }
 
 #[tokio::test]
@@ -330,7 +330,7 @@ async fn streamed_chat_asks_for_usage_and_is_counted() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert_eq!(models, json!([{ "model": "fake/m1", "requests": 1, "total_tokens": 24 }]));
+    assert_eq!(models, json!([{ "model": "fake/m1", "requests": 1, "input_tokens": 20, "output_tokens": 4, "total_tokens": 24 }]));
 }
 
 #[tokio::test]
@@ -348,7 +348,7 @@ async fn anthropic_messages_go_to_the_anthropic_side_with_its_headers() {
     assert!(seen.headers.get("authorization").is_none());
     assert_eq!(seen.body["model"], "m2");
     let usage = r.public("GET", "/v1/user/usage", &[("x-api-key", &key)], None).await.json();
-    assert_eq!(usage["models"], json!([{ "model": "fake/m2", "requests": 1, "total_tokens": 5 }]));
+    assert_eq!(brief(&usage["models"]), json!([{ "model": "fake/m2", "requests": 1, "total_tokens": 5 }]));
 }
 
 #[tokio::test]
@@ -467,17 +467,91 @@ async fn usage_is_bucketed_by_the_viewers_calendar() {
     let month = r.public("GET", "/v1/user/usage?period=month&tz=480", &h, None).await.json();
     let year = r.public("GET", "/v1/user/usage?period=year&tz=480", &h, None).await.json();
     // Early in a month or year the planted rows can coincide; the counts only grow outward
-    assert_eq!(requests(&day), 2);
+    // On the 1st, the month's planted rows are today's too: today counts what the month's bucket for today does
+    let today = &day["series"][0]["bucket"].as_str().unwrap()[..10];
+    let month_today = month["series"].as_array().unwrap().iter().filter(|b| b["bucket"] == today).map(|b| b["requests"].as_i64().unwrap()).sum::<i64>();
+    assert!(requests(&day) >= 2 && requests(&day) == month_today, "{day} {month}");
     assert!(requests(&month) >= 5 && requests(&year) >= requests(&month) && requests(&year) <= 6, "{month} {year}");
-    assert_eq!(day["series"][0]["bucket"], "00");
-    assert_eq!(day["models"], json!([{ "model": "a/x", "requests": 1, "total_tokens": 100 }, { "model": "b/y", "requests": 1, "total_tokens": 10 }]));
-    // Viewed from UTC, 00:30 in UTC+8 belongs to yesterday (unless it's before 08:00 UTC… then it's still today there too)
+    assert!(day["series"][0]["bucket"].as_str().unwrap().ends_with(" 00"), "{day}");
+    assert!(brief(&day["models"]).as_array().unwrap().contains(&json!({ "model": "b/y", "requests": 1, "total_tokens": 10 })), "{day}");
+    // Viewed from UTC, 00:30 in UTC+8 is 16:30 the day before
     let utc_day = r.public("GET", "/v1/user/usage?period=day&tz=0", &h, None).await.json();
-    assert!(requests(&utc_day) <= 2);
+    assert!(!utc_day["models"].as_array().unwrap().iter().any(|m| m["model"] == "b/y"), "{utc_day}");
 
     let admin = r.admin("GET", "/admin/usage?period=day&tz=480", None).await.json();
-    assert_eq!(admin["rows"].as_array().unwrap().len(), 2);
+    assert!(admin["rows"].as_array().unwrap().len() == 2, "{admin}");
     assert_eq!(admin["rows"][0]["username"], "bob");
     assert_eq!(r.admin("GET", "/admin/usage", None).await.status, StatusCode::OK);
-    assert_eq!(r.admin("GET", "/admin/usage?period=week", None).await.status, StatusCode::BAD_REQUEST);
+    let week = r.admin("GET", "/admin/usage?period=week&tz=480", None).await.json();
+    assert!(requests(&week) >= 2 && requests(&week) <= requests(&year), "{week}");
+    assert_eq!(week["to"].as_i64().unwrap() - week["from"].as_i64().unwrap(), 7 * 86400);
+    assert_eq!(week["step"], "day");
+}
+
+/// `models` entries without the input/output split
+fn brief(models: &serde_json::Value) -> serde_json::Value {
+    models.as_array().unwrap().iter()
+        .map(|m| json!({ "model": m["model"], "requests": m["requests"], "total_tokens": m["total_tokens"] }))
+        .collect()
+}
+
+#[tokio::test]
+async fn usage_ranges_split_filter_and_compare() {
+    let r = Relay::start().await;
+    let (bob, key) = r.user("bob", "bobpassword1").await;
+    let (amy, _) = r.user("amy", "amypassword1").await;
+    // 2026-01-01 00:00 UTC, and rows an hour, a day and a month after it
+    let t0: i64 = 1767225600;
+    let row = |user: i64, model: &str, input: i64, output: i64, at: i64| format!(
+        "INSERT INTO usage_logs (user_id, model, input_tokens, output_tokens, created_at) VALUES ({user}, '{model}', {input}, {output}, datetime({at}, 'unixepoch'))");
+    r.sql(&row(bob, "kimi/k3", 100, 10, t0 + 3600)).await;
+    r.sql(&row(bob, "kimi/k2", 200, 20, t0 + 3600)).await;
+    r.sql(&row(bob, "ark/a", 300, 30, t0 + 86400 + 60)).await;
+    r.sql(&row(amy, "kimi/k3", 1000, 100, t0 + 3600)).await;
+    r.sql(&row(bob, "kimi/k3", 5, 5, t0 - 3600)).await;
+
+    let auth = bearer(&key);
+    let h = [("authorization", auth.as_str())];
+    let get = |q: String| { let h = h; let r = &r; async move { r.public("GET", &format!("/v1/user/usage?{q}"), &h, None).await } };
+
+    // Two days at UTC: picked by hour, split by provider
+    let u = get(format!("from={t0}&to={}&tz=0&group=provider", t0 + 2 * 86400)).await.json();
+    assert_eq!(u["step"], "hour");
+    assert_eq!(u["totals"], json!({ "requests": 3, "input_tokens": 600, "output_tokens": 60, "total_tokens": 660 }));
+    let series: Vec<_> = u["series"].as_array().unwrap().iter().map(|b| (b["bucket"].as_str().unwrap(), b["group"].as_str().unwrap(), b["total_tokens"].as_i64().unwrap())).collect();
+    assert_eq!(series, [("2026-01-01 01", "kimi", 330), ("2026-01-02 00", "ark", 330)]);
+    assert_eq!(u["present_models"], json!(["ark/a", "kimi/k2", "kimi/k3"]));
+    assert_eq!(u["present_users"], json!([]), "a user sees no one else");
+    assert_eq!(u["models"][0]["model"], "ark/a");
+
+    // By day in UTC+8; one provider; against the day before
+    let u = get(format!("from={}&to={}&tz=480&step=day&model=kimi/*&compare_from={}&compare_to={}", t0, t0 + 2 * 86400, t0 - 86400, t0)).await.json();
+    let series: Vec<_> = u["series"].as_array().unwrap().iter().map(|b| (b["bucket"].as_str().unwrap(), b["group"].as_str().unwrap(), b["requests"].as_i64().unwrap())).collect();
+    assert_eq!(series, [("2026-01-01", "", 2)]);
+    assert_eq!(u["previous"]["total_tokens"], 10);
+    assert_eq!(u["present_models"], json!(["ark/a", "kimi/k2", "kimi/k3"]), "choices ignore the model filter");
+    // One model exactly
+    let u = get(format!("from={t0}&to={}&model=kimi/k3", t0 + 86400)).await.json();
+    assert_eq!(u["totals"]["total_tokens"], 110);
+
+    // Users can't look at others, nor split by user
+    for q in [format!("from={t0}&to={}&group=user", t0 + 86400), format!("from={t0}&to={}&user={amy}", t0 + 86400)] {
+        assert_eq!(get(q).await.status, StatusCode::BAD_REQUEST);
+    }
+    // Ranges must be sane and charts bounded
+    for q in [format!("from={t0}"), format!("from={t0}&to={t0}"), format!("from={t0}&to={}&step=hour", t0 + 40 * 86400), format!("from={t0}&to={}&compare_from=1", t0 + 86400)] {
+        assert_eq!(get(q.clone()).await.status, StatusCode::BAD_REQUEST, "{q}");
+    }
+    assert_eq!(get(format!("from={t0}&to={}", t0 + 40 * 86400)).await.json()["step"], "day");
+    assert_eq!(get(format!("from={t0}&to={}", t0 + 400 * 86400)).await.json()["step"], "month");
+
+    // The admin sees everyone, split by user, or one user
+    let a = r.admin("GET", &format!("/admin/usage?from={t0}&to={}&group=user", t0 + 86400), None).await.json();
+    let groups: Vec<_> = a["series"].as_array().unwrap().iter().map(|b| (b["group"].as_str().unwrap(), b["total_tokens"].as_i64().unwrap())).collect();
+    assert_eq!(groups, [("amy", 1100), ("bob", 330)]);
+    assert_eq!(a["present_users"], json!([{ "id": amy, "username": "amy" }, { "id": bob, "username": "bob" }]));
+    assert_eq!(a["rows"][0]["username"], "amy");
+    let a = r.admin("GET", &format!("/admin/usage?from={t0}&to={}&user={amy}", t0 + 86400), None).await.json();
+    assert_eq!(a["totals"]["total_tokens"], 1100);
+    assert_eq!(a["present_users"].as_array().unwrap().len(), 2, "user choices ignore the user filter");
 }
