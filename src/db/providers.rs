@@ -124,6 +124,12 @@ pub async fn add_key(db: &Db, provider_id: i64, api_key: &str, label: &str, prio
         .bind(provider_id).bind(api_key).bind(label).bind(priority).fetch_one(db).await
 }
 
+/// Lower goes first; None when there's no such key.
+pub async fn set_priority(db: &Db, id: i64, priority: i64) -> sqlx::Result<Option<ProviderKey>> {
+    sqlx::query_as(&format!("UPDATE provider_keys SET priority = ? WHERE id = ? RETURNING {KEY_COLUMNS}"))
+        .bind(priority).bind(id).fetch_optional(db).await
+}
+
 pub async fn delete_key(db: &Db, id: i64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM provider_keys WHERE id = ?").bind(id).execute(db).await?;
     Ok(())

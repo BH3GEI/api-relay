@@ -242,13 +242,17 @@ async function renderKeys() {
   document.getElementById('keys-body').innerHTML = keys.map(k => `<tr>
     <td>${k.id}</td><td>${esc(k.label || '-')}${k === inUse ? ' <span style="color:#2563eb">● in use</span>' : ''}</td>
     <td><code style="font-size:11px">${esc(k.api_key)}</code></td>
-    <td>${k.priority}</td>
+    <td><input type="number" value="${k.priority}" style="width:60px;margin:0" title="Lower goes first" onchange="setPriority(${k.id}, this.value)"></td>
     <td>${keyStatus(k.status)}</td>
     <td style="white-space:nowrap">${quotaCell(k.quota)}</td>
     <td>${ago(k.status.last_used)}</td>
     <td>${k.status.ok} / ${k.status.failed}</td>
     <td class="actions"><button class="btn-danger btn-sm" onclick="deleteKey(${k.id})">Delete</button></td>
   </tr>`).join('');
+}
+async function setPriority(id, value) {
+  await api(`/admin/keys/priority/${id}`, { method: 'PUT', body: JSON.stringify({ priority: parseInt(value) || 0 }) });
+  await renderKeys();
 }
 async function createKey() {
   await api(`/admin/keys/${currentProviderId}`, { method:'POST', body: JSON.stringify({

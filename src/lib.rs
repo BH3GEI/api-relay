@@ -134,6 +134,7 @@ fn lan_routes() -> Routes {
         .route("/admin/providers/:id", put(admin::update_provider).delete(admin::delete_provider))
         .route("/admin/keys/:provider_id", get(admin::keys).post(admin::add_key))
         .route("/admin/keys/delete/:id", delete(admin::delete_key))
+        .route("/admin/keys/priority/:id", put(admin::set_key_priority))
         .route("/admin/catalog", get(admin::catalog))
         .route("/admin/catalog/refresh", post(admin::refresh_catalog))
         .route("/admin/usage", get(admin::usage))

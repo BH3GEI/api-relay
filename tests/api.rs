@@ -294,6 +294,32 @@ async fn chat_is_relayed_on_the_first_working_key_and_counted() {
 }
 
 #[tokio::test]
+async fn a_busy_key_is_waited_for_and_a_spent_one_set_aside() {
+    let r = Relay::start().await;
+    let id = r.provider("fake", &["spent", "busy2"]).await;
+    let (_, key) = r.user("bob", "bobpassword1").await;
+    let resp = r.public("POST", "/v1/chat/completions", &[("authorization", &bearer(&key))], Some(json!({ "model": "fake/m1", "messages": [] }))).await;
+    assert_eq!(resp.status, StatusCode::OK, "{}", resp.text);
+    let auths: Vec<_> = r.upstream.seen("/v1/chat/completions").iter().map(|s| s.headers["authorization"].to_str().unwrap().to_string()).collect();
+    assert_eq!(auths, ["Bearer spent", "Bearer busy2", "Bearer busy2", "Bearer busy2"], "only the busy key is tried again");
+    let keys = r.admin("GET", &format!("/admin/keys/{id}"), None).await.json();
+    let cooling = |tail: &str| keys.as_array().unwrap().iter().find(|k| k["api_key"] == tail).unwrap()["status"]["cooling_secs"].as_u64().unwrap();
+    assert!(cooling("…pent") > 1000, "a spent key waits for its quota");
+    assert_eq!(cooling("…usy2"), 0);
+    // While it cools, the spent key is left out
+    r.public("POST", "/v1/chat/completions", &[("authorization", &bearer(&key))], Some(json!({ "model": "fake/m1", "messages": [] }))).await;
+    assert_eq!(r.upstream.seen("/v1/chat/completions").len(), 5);
+
+    // The admin reorders keys by priority
+    let spent = keys.as_array().unwrap().iter().find(|k| k["api_key"] == "…pent").unwrap()["id"].as_i64().unwrap();
+    let set = r.admin("PUT", &format!("/admin/keys/priority/{spent}"), Some(json!({ "priority": 9 }))).await;
+    assert_eq!(set.json()["priority"], 9);
+    let keys = r.admin("GET", &format!("/admin/keys/{id}"), None).await.json();
+    assert_eq!(keys[1]["api_key"], "…pent");
+    assert_eq!(r.admin("PUT", "/admin/keys/priority/999", Some(json!({ "priority": 1 }))).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn a_refused_key_hands_over_to_the_next() {
     let r = Relay::start().await;
     // A key that lists models fine but is refused for chat

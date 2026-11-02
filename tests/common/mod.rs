@@ -26,7 +26,9 @@ pub struct Seen {
 }
 
 /// An upstream that answers like Kimi would: an OpenAI side under /v1 and an Anthropic side.
-/// The key `bad` is always refused with 401, `chatbad` only for chat; any other key works.
+/// The key `bad` is always refused with 401, `chatbad` only for chat. For chat, as Kimi answers
+/// them: `spent` has used up its weekly quota (429) and `busy2` is at its concurrency limit
+/// (403) for its first two requests. Any other key works.
 pub struct Upstream {
     pub base: String,
     pub seen: Arc<Mutex<Vec<Seen>>>,
@@ -78,6 +80,13 @@ async fn chat(State(seen): State<Arc<Mutex<Vec<Seen>>>>, headers: HeaderMap, bod
     record(&seen, "/v1/chat/completions", &headers, &body);
     if refused(&headers) || key(&headers) == "chatbad" {
         return (StatusCode::UNAUTHORIZED, r#"{"error":"account a@b.c is suspended"}"#).into_response();
+    }
+    if key(&headers) == "spent" {
+        return (StatusCode::TOO_MANY_REQUESTS, r#"{"error":{"message":"You've reached your weekly (7-day) usage limit.","type":"exceeded_current_quota_error"}}"#).into_response();
+    }
+    let tries = seen.lock().unwrap().iter().filter(|s| s.path == "/v1/chat/completions" && key(&s.headers) == "busy2").count();
+    if key(&headers) == "busy2" && tries <= 2 {
+        return (StatusCode::FORBIDDEN, r#"{"error":{"message":"You've reached your concurrent request limit.","type":"access_terminated_error"}}"#).into_response();
     }
     let req: Value = serde_json::from_slice(&body).unwrap_or_default();
     if req["stream"] == true {

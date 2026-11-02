@@ -112,6 +112,15 @@ pub async fn add_key(State(state): St, _: Admin, Path(provider_id): Path<i64>, J
     Ok(Json(key))
 }
 
+#[derive(Deserialize)]
+pub struct Priority {
+    priority: i64,
+}
+
+pub async fn set_key_priority(State(state): St, _: Admin, Path(id): Path<i64>, Json(req): Json<Priority>) -> Result<Json<ProviderKey>> {
+    Ok(Json(db::providers::set_priority(&state.db, id, req.priority).await?.or_not_found()?))
+}
+
 pub async fn delete_key(State(state): St, _: Admin, Path(id): Path<i64>) -> Result<StatusCode> {
     db::providers::delete_key(&state.db, id).await?;
     Ok(StatusCode::NO_CONTENT)
