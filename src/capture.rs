@@ -24,8 +24,6 @@ pub type Store = SqlitePool;
 const REF: &str = "$relay_ref";
 /// Parts smaller than this stay in the request; a reference would save little
 const MIN_SHARED: usize = 128;
-/// Responses beyond this are cut off (generated media)
-const MAX_RESPONSE: usize = 64 << 20;
 const LEVEL: i32 = 3;
 
 const SCHEMA: &[&str] = &[
@@ -90,7 +88,8 @@ struct Pending {
     row: Row,
     /// The request as sent upstream, or as received until then
     body: String,
-    response: Vec<u8>,
+    /// Compressed as it arrives, so even a huge response is kept whole in little memory
+    response: zstd::stream::write::Encoder<'static, Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -140,7 +139,7 @@ impl Capture {
             content: user.record_content,
             ..Row::default()
         };
-        Capture(Some(Pending { store: store.clone(), started: Instant::now(), row, body: body.to_string(), response: Vec::new() }))
+        Capture(Some(Pending { store: store.clone(), started: Instant::now(), row, body: body.to_string(), response: zstd::stream::write::Encoder::new(Vec::new(), LEVEL).expect("zstd encoder") }))
     }
 
     fn row(&mut self) -> Option<&mut Row> {
@@ -196,9 +195,8 @@ impl Capture {
         let Some(p) = self.0.as_mut() else { return };
         p.row.first_byte_ms.get_or_insert_with(|| p.started.elapsed().as_millis() as i64);
         p.row.response_bytes += bytes.len() as i64;
-        if p.row.content && p.response.len() < MAX_RESPONSE {
-            let room = MAX_RESPONSE - p.response.len();
-            p.response.extend_from_slice(&bytes[..bytes.len().min(room)]);
+        if p.row.content {
+            let _ = std::io::Write::write_all(&mut p.response, bytes);
         }
     }
 
@@ -236,7 +234,7 @@ async fn save(p: Pending, total_ms: i64) -> Result<(), String> {
     let (request, parts, response) = if content {
         tokio::task::spawn_blocking(move || {
             let (skeleton, parts) = split(&body);
-            (zip(&skeleton), parts, zip(&response))
+            (zip(&skeleton), parts, response.finish().unwrap_or_default())
         }).await.map_err(|e| e.to_string())?
     } else {
         (Vec::new(), Vec::new(), Vec::new())
