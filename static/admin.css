@@ -23,3 +23,23 @@ td.actions { white-space: nowrap; text-align: right; }
 #req-detail summary { cursor: pointer; color: #888; font-size: 13px; }
 .meta-grid { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 13px; }
 .meta-grid div:nth-child(odd) { color: #888; }
+
+/* Phones: each table row becomes a small card, a cell per line under its column's name */
+@media (max-width: 640px) {
+  body { padding: 16px 12px; }
+  .card { padding: 14px; }
+  #req-detail { inset: 0; border-radius: 0; border: none; padding: 14px; }
+  table thead { display: none; }
+  table, tbody, tr, td { display: block; width: 100%; }
+  tr { border-bottom: 1px solid #222; padding: 8px 0; }
+  td { border: none; padding: 3px 0; display: grid; grid-template-columns: 8em minmax(0, 1fr); gap: 8px; word-break: break-word; }
+  td::before { content: attr(data-label); color: #888; }
+  td:not([data-label]) { display: block; }
+  td > * { grid-column: 2; }
+  .card table td.actions, .card table td.n { text-align: left; white-space: normal; }
+  /* The chart's hover tip stays a small table */
+  .uv-tip table { display: table; width: auto; }
+  .uv-tip tbody { display: table-row-group; }
+  .uv-tip tr { display: table-row; padding: 0; border: none; }
+  .uv-tip td { display: table-cell; width: auto; padding: 1px 0 1px 10px; }
+}

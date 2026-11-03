@@ -501,6 +501,17 @@ function exportRequests() {
   location.href = BASE + '/admin/requests/export?' + reqFilter();
 }
 
+// Each cell knows its column's name, for the phone layout (admin.css)
+function labelCells() {
+  document.querySelectorAll('table').forEach(t => {
+    const heads = [...t.querySelectorAll('thead th')].map(th => th.textContent.trim());
+    t.querySelectorAll('tbody tr').forEach(tr => [...tr.children].forEach((td, i) => {
+      if (heads[i] && td.colSpan === 1) td.dataset.label = heads[i];
+    }));
+  });
+}
+new MutationObserver(labelCells).observe(document.body, { childList: true, subtree: true });
+
 function logout() {
   token = null;
   localStorage.removeItem('admin_token');
