@@ -143,7 +143,7 @@ async fn fetch_models(state: &AppState, p: &Provider) -> Option<Vec<(String, Val
     let keys = db::providers::usable_keys(&state.db, p.id).await.ok()?;
     let url = format!("{}/models", p.base_url.trim_end_matches('/'));
 
-    let resp = state.keys.send(keys, |key| {
+    let resp = state.keys.send(keys, &mut Vec::new(), |key| {
         state.http_client
             .get(&url)
             .timeout(Duration::from_secs(20))

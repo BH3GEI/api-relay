@@ -36,7 +36,8 @@ function showTab(name) {
   if (name === 'usage') loadUsage();
   if (name === 'limits') loadLimits();
   if (name === 'tunnel') loadTunnel();
-  ['users','providers','models','usage','limits','tunnel'].forEach(t => {
+  if (name === 'requests') loadRequests();
+  ['users','providers','models','usage','requests','limits','tunnel'].forEach(t => {
     document.getElementById('tab-'+t).classList.toggle('hidden', t !== name);
   });
   document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
@@ -50,6 +51,7 @@ async function loadUsers() {
   tb.innerHTML = users.map(u => `<tr>
     <td>${u.id}</td><td>${esc(u.username)}</td><td>${esc(u.email || '-')}</td><td><code style="font-size:11px">${esc(u.api_key)}</code></td>
     <td>${u.is_admin ? 'Yes' : 'No'}</td>
+    <td>${u.record_content ? 'Yes' : '<span style="color:#fbbf24">Opted out</span>'}</td>
     <td><button class="secondary btn-sm" onclick="setPassword(${u.id})">Set Password</button> <button class="btn-danger btn-sm" onclick="deleteUser(${u.id})">Delete</button></td>
   </tr>`).join('');
 }
@@ -359,6 +361,149 @@ async function disableFrp() {
   await api('/admin/frp', { method: 'PUT', body: JSON.stringify({ server: '' }) });
   document.getElementById('frp-server').value = '';
   loadFrp();
+}
+
+// Recorded calls
+// Newest first; "Load more" pages back from the oldest shown
+let reqOldest = null;
+const REQ_PAGE = 50;
+function reqFilter() {
+  const q = new URLSearchParams();
+  const user = document.getElementById('req-user').value;
+  const model = document.getElementById('req-model').value.trim();
+  const status = document.getElementById('req-status').value;
+  if (user) q.set('user', user);
+  if (model) q.set('model', model);
+  if (status) q.set('status', status);
+  return q;
+}
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1 << 20) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1 << 30) return (n / (1 << 20)).toFixed(1) + ' MB';
+  return (n / (1 << 30)).toFixed(2) + ' GB';
+}
+function fmtMs(ms) { return ms == null ? '-' : ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(1) + ' s'; }
+function fmtTime(ms) { return new Date(ms).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+function statusCell(c) {
+  if (c.status == null) return '<span style="color:#888" title="The client left before an answer">left</span>';
+  const ok = c.status >= 200 && c.status < 300;
+  const cut = ok && !c.complete ? ' <span style="color:#fbbf24" title="The client hung up before the response ended">cut</span>' : '';
+  return `<span style="color:${ok ? '#4ade80' : '#f87171'}" title="${esc(c.error || '')}">${c.status}</span>${cut}`;
+}
+async function loadRequests(more) {
+  if (!more) {
+    reqOldest = null;
+    api('/admin/requests/stats').then(s => {
+      const since = s.since ? ' since ' + new Date(s.since).toLocaleDateString() : '';
+      document.getElementById('req-stats').textContent =
+        `${s.requests.toLocaleString()} calls recorded${since}, ${s.with_content.toLocaleString()} with content · ${s.parts.toLocaleString()} shared parts · ${fmtBytes(s.bytes)} on disk`;
+    }).catch(() => {});
+    const sel = document.getElementById('req-user');
+    if (sel.options.length === 1) {
+      (await api('/admin/users')).forEach(u => sel.add(new Option(u.username, u.id)));
+    }
+  }
+  const q = reqFilter();
+  q.set('limit', REQ_PAGE);
+  if (more && reqOldest) q.set('before', reqOldest);
+  const rows = await api('/admin/requests?' + q);
+  if (rows.length) reqOldest = rows[rows.length - 1].id;
+  const html = rows.map(c => `<tr onclick="showRequest(${c.id})">
+    <td style="white-space:nowrap">${fmtTime(c.started_at)}</td>
+    <td>${esc(c.username)}</td>
+    <td><code>${esc(c.model || '-')}</code>${c.stream ? ' <span style="color:#666">stream</span>' : ''}${c.endpoint === 'chat_completions' ? '' : ` <span style="color:#666">${esc(c.endpoint)}</span>`}</td>
+    <td>${statusCell(c)}</td>
+    <td><code>${esc(c.key || '-')}</code></td>
+    <td>${esc(c.entry)}</td>
+    <td style="white-space:nowrap">${c.input_tokens.toLocaleString()} / ${c.output_tokens.toLocaleString()}</td>
+    <td>${fmtMs(c.first_byte_ms)}</td>
+    <td>${fmtMs(c.total_ms)}</td>
+    <td style="white-space:nowrap">${fmtBytes(c.request_bytes)} / ${fmtBytes(c.response_bytes)}${c.content ? '' : ' <span style="color:#666" title="The user opted out of content recording">no content</span>'}</td>
+  </tr>`).join('');
+  const tb = document.getElementById('req-body');
+  if (more) tb.insertAdjacentHTML('beforeend', html);
+  else tb.innerHTML = html || '<tr><td colspan="10" style="color:#666">No calls recorded yet.</td></tr>';
+  document.getElementById('req-more').classList.toggle('hidden', rows.length < REQ_PAGE);
+}
+
+// A message's text: plain content, or the text parts of a list, other parts as JSON
+function partText(p) {
+  if (typeof p === 'string') return p;
+  if (p && typeof p.text === 'string') return p.text;
+  return JSON.stringify(p, null, 2);
+}
+function messageText(m) {
+  const c = m.content ?? m.parts ?? m;
+  const text = Array.isArray(c) ? c.map(partText).join('\n\n') : partText(c);
+  const calls = m.tool_calls ? '\n\n' + JSON.stringify(m.tool_calls, null, 2) : '';
+  return text + calls;
+}
+// What a streamed answer said, put together from its events
+function streamText(raw) {
+  let text = '';
+  for (const line of raw.split('\n')) {
+    if (!line.startsWith('data:')) continue;
+    let ev;
+    try { ev = JSON.parse(line.slice(5)); } catch { continue; }
+    const d = ev.choices?.[0]?.delta;
+    if (d) text += (d.reasoning_content || '') + (d.content || '') + (d.tool_calls ? JSON.stringify(d.tool_calls) : '');
+    if (ev.type === 'content_block_delta') text += ev.delta?.text || ev.delta?.thinking || ev.delta?.partial_json || '';
+    if (ev.type === 'response.output_text.delta') text += ev.delta || '';
+  }
+  return text;
+}
+async function showRequest(id) {
+  const d = await api('/admin/requests/' + id);
+  const box = document.getElementById('req-detail');
+  const meta = [
+    ['Time', fmtTime(d.started_at)], ['User', d.username], ['Endpoint', d.endpoint + (d.stream ? ' (stream)' : '')],
+    ['Model', `${d.model} → ${d.provider ? d.provider + ' / ' + d.upstream_model : '-'}`], ['Status', `${d.status ?? 'client left'}${d.error ? ' · ' + d.error : ''}${d.complete ? '' : ' · incomplete'}`],
+    ['Key', d.key || '-'], ['Via', `${d.entry} · ${d.client_ip || '-'}`], ['User-Agent', d.user_agent || '-'],
+    ['Tokens', `${d.input_tokens.toLocaleString()} in / ${d.output_tokens.toLocaleString()} out`],
+    ['Timing', `first byte ${fmtMs(d.first_byte_ms)} · total ${fmtMs(d.total_ms)}`],
+    ['Size', `${fmtBytes(d.request_bytes)} request / ${fmtBytes(d.response_bytes)} response`],
+  ].map(([k, v]) => `<div>${k}</div><div>${esc(v)}</div>`).join('');
+  const attempts = (d.attempts || []).map(a => `<tr><td><code>${esc(a.key)}</code></td><td>${a.status ?? 'network error'}</td><td>${esc(a.failure || (a.served ? 'served' : ''))}</td><td>${fmtMs(a.ms)}</td><td style="font-size:11px;color:#888">${esc(a.detail || '')}</td></tr>`).join('');
+
+  let request = '<p style="color:#666">Not recorded: the user opted out.</p>';
+  if (d.request != null) {
+    const r = d.request;
+    const convo = [];
+    if (r.system) convo.push(['system', Array.isArray(r.system) ? r.system.map(partText).join('\n\n') : r.system]);
+    if (r.instructions) convo.push(['instructions', r.instructions]);
+    const msgs = Array.isArray(r.messages) ? r.messages : Array.isArray(r.input) ? r.input : Array.isArray(r.contents) ? r.contents : [];
+    msgs.forEach(m => convo.push([m.role || m.type || '', messageText(m)]));
+    request = `<p style="color:#888;font-size:13px">${msgs.length} messages${r.tools ? ' · ' + r.tools.length + ' tools' : ''}</p>` +
+      convo.map(([role, text]) => `<div class="msg-role">${esc(role)}</div><pre>${esc(text)}</pre>`).join('') +
+      `<details><summary>Full request JSON</summary><pre>${esc(JSON.stringify(r, null, 2))}</pre></details>`;
+  }
+  let response = '<p style="color:#666">Not recorded.</p>';
+  if (d.response != null) {
+    const assembled = d.stream ? streamText(d.response) : '';
+    let pretty = d.response;
+    try { pretty = JSON.stringify(JSON.parse(d.response), null, 2); } catch {}
+    response = (assembled ? `<pre>${esc(assembled)}</pre><details><summary>Raw stream</summary><pre>${esc(d.response)}</pre></details>` : `<pre>${esc(pretty)}</pre>`);
+  }
+  box.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin-top:0">Call #${d.id}</h2><button class="secondary" onclick="closeRequest()">Close</button></div>
+    <div class="meta-grid">${meta}</div>
+    <h2>Attempts</h2>${attempts ? `<table><thead><tr><th>Key</th><th>Status</th><th>Result</th><th>Time</th><th>Upstream said</th></tr></thead><tbody>${attempts}</tbody></table>` : '<p style="color:#666">No upstream was tried.</p>'}
+    <h2>Request</h2>${request}
+    <h2>Response</h2>${response}
+    <details><summary>Client headers</summary><pre>${esc(JSON.stringify(d.headers, null, 2))}</pre></details>`;
+  box.classList.remove('hidden');
+  box.scrollTop = 0;
+}
+function closeRequest() { document.getElementById('req-detail').classList.add('hidden'); }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeRequest(); });
+// Downloads through the page, so it carries the session; for very large exports use the API with curl
+async function exportRequests() {
+  const r = await fetch(BASE + '/admin/requests/export?' + reqFilter(), { headers: { 'Authorization': 'Bearer ' + token } });
+  if (!r.ok) { alert('Export failed: ' + r.status); return; }
+  const url = URL.createObjectURL(await r.blob());
+  const a = document.createElement('a');
+  a.href = url; a.download = 'requests.jsonl'; a.click();
+  URL.revokeObjectURL(url);
 }
 
 function logout() {

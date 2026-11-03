@@ -182,6 +182,22 @@ pub async fn quota(State(state): State<Arc<AppState>>, Caller(user): Caller) -> 
     Ok(Json(Quota { limits, providers: quota::pool(&state).await }))
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct Recording {
+    /// Whether requests and responses are recorded in full; when off, only what a call was
+    /// (time, model, tokens, timing, status) is
+    content: bool,
+}
+
+pub async fn recording(Caller(user): Caller) -> Json<Recording> {
+    Json(Recording { content: user.record_content })
+}
+
+pub async fn set_recording(State(state): State<Arc<AppState>>, Caller(user): Caller, Json(req): Json<Recording>) -> Result<Json<Recording>> {
+    db::users::set_record_content(&state.db, user.id, req.content).await?;
+    Ok(Json(req))
+}
+
 /// What the home page should tell users to configure: the public address when there is one, and a backup.
 pub async fn config(State(state): State<Arc<AppState>>, _: Caller) -> Result<Json<Value>> {
     let public_url = db::settings::get_nonempty(&state.db, db::settings::PUBLIC_URL).await?;

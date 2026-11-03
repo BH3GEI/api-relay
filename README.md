@@ -31,6 +31,7 @@ Rust 单二进制 + SQLite，可以独立运行，也可以打包成懒猫微服
   | `GET /v1/user/api-key`、`POST /v1/user/api-key/refresh` | 查看 / 更换自己的 API key，旧 key 立刻失效 |
   | `PUT /v1/user/password` | 改密码，body 是 `{"current_password": "…", "new_password": "…"}`，至少 8 位 |
   | `GET /v1/user/config` | 用户该填的 Base URL（公网地址） |
+  | `GET /v1/user/recording`、`PUT /v1/user/recording` | 查看 / 设置是否记录自己请求和回复的内容，body 是 `{"content": false}`（见下方"请求记录"） |
 
   管理接口（`/admin/…`）只认网页登录的会话，不接受 API key。
 
@@ -120,6 +121,26 @@ env_key = "RELAY_KEY"
 
 Base URL 填 `https://relay.example.com/v1`，key 填你的 relay key，模型填 `kimi/k3` 这样的模型名。
 
+## 请求记录
+
+每次模型调用都会记一条（`/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`count_tokens`、图片和视频生成），包括失败的和被中转站自己拒绝的（未知模型、超限额）：
+
+- **元数据**：时间、用户、请求的模型和实际转到的服务商 / 上游模型、是否流式、入口（`lan` / `tunnel` / `frp`）、客户端 IP 和 User-Agent、客户端请求头（去掉 `Authorization`、`x-api-key`、`Cookie`）、返回给客户端的状态码和错误、每次尝试了哪把 key（末 4 位）、上游状态和错误内容、首字节和总耗时、输入 / 输出 token、请求和回复的字节数、回复是否完整传完（客户端中途断开会标出来）。
+- **内容**：发往上游的请求原文（模型名已换成上游的）和回复原文（流式回复保留每个事件）。用户可以在首页或用 `PUT /v1/user/recording` 关掉内容记录，关掉后只记元数据；首页和登录页都写明了会记录。
+
+记录存在单独的库 `CAPTURE_DATABASE_URL`（懒猫上是 `/lzcapp/var/capture.db`），不影响 `relay.db`。agent 每一轮都会把整段对话重发一遍，所以 `messages` / `input` / `contents` 里的每条消息、`system`、`instructions`、`tools` 按内容哈希只存一份，请求里只留引用，读出时再拼回去；所有内容用 zstd 压缩。拼回来的请求和原请求内容一样，只是不保留 JSON 的空白。永久保留，不自动清理。
+
+管理接口：
+
+| 接口 | 用途 |
+|---|---|
+| `GET /admin/requests` | 最新的在前；可选 `user=<id>`、`model=kimi/k3` 或 `kimi/*`、`status=ok\|error`、`from`/`to`（Unix 毫秒）、`before=<id>` 翻页、`limit`（最多 500） |
+| `GET /admin/requests/<id>` | 一条的全部内容：元数据、每次尝试、`request`（JSON）、`response`（原文） |
+| `GET /admin/requests/export` | 按同样的筛选导出全部内容，JSONL，按时间顺序，流式输出 |
+| `GET /admin/requests/stats` | 条数、带内容的条数、共享片段数、库文件大小 |
+
+后台 Requests 页可以按用户、模型、状态筛选，点开一条看整段对话和回复（流式回复会拼成文本），也能导出。大量导出建议在盒子上直接读 `capture.db`，或用 curl 调导出接口。
+
 ## 用户和限额
 
 - **限额**在后台 Limits 页设置：选用户、模型、时间窗口（最近 5 小时 / 1 天 / 1 周，滚动计算），再填最多多少次请求、多少 token。模型填完整模型名（如 `ark/ark-code-latest`）只限这一个模型，填 `服务商/*`（如 `mac/*`）限这个服务商的全部模型、包括以后新增的，填 `*` 限全部；写错的模型名会被拒绝。留空表示不限，填 `0` 表示禁用。超出返回 429。
@@ -186,6 +207,7 @@ DATABASE_URL="sqlite:relay.db?mode=rwc" BIND_ADDR=127.0.0.1:3000 ./target/releas
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
 | `DATABASE_URL` | `sqlite:relay.db?mode=rwc` | SQLite 数据库 |
+| `CAPTURE_DATABASE_URL` | `sqlite:capture.db?mode=rwc` | 请求记录的数据库（见"请求记录"） |
 | `BIND_ADDR` | `0.0.0.0:3000` | 监听地址 |
 | `JWT_SECRET` | 首次启动时生成并存入数据库 | 网页登录的签名密钥 |
 | `PUBLIC_BIND_ADDR` | 不设 | 公网专用端口，提供 API 和首页（密码登录），给隧道用 |

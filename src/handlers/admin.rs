@@ -1,11 +1,17 @@
 //! The admin API, for the admin page on the LAN side. Every handler takes an `Admin`.
 
-use axum::{Json, extract::{Path, Query, State}, http::StatusCode};
+use axum::{
+    Json,
+    body::Body,
+    extract::{Path, Query, State},
+    http::{StatusCode, header},
+    response::Response,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::{
-    AppState, auth, catalog,
+    AppState, auth, capture, catalog,
     db::{self, limits, providers::{Provider, ProviderInput, ProviderKey}, users::User},
     error::{OrNotFound, Result},
     extract::Admin,
@@ -244,4 +250,76 @@ pub async fn set_public_url(State(state): St, _: Admin, Json(req): Json<PublicUr
     }
     db::settings::set(&state.db, db::settings::PUBLIC_URL, url).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Recorded calls ──
+
+#[derive(Deserialize)]
+pub struct RequestQuery {
+    user: Option<i64>,
+    model: Option<String>,
+    /// "ok" or "error"
+    status: Option<String>,
+    /// `[from, to)`, unix milliseconds
+    from: Option<i64>,
+    to: Option<i64>,
+    /// The page before this record (newest first)
+    before: Option<i64>,
+    limit: Option<i64>,
+}
+
+impl RequestQuery {
+    fn filter(&self) -> capture::Filter {
+        capture::Filter {
+            user_id: self.user,
+            model: self.model.clone().filter(|m| !m.is_empty()),
+            status: self.status.clone().filter(|s| !s.is_empty()),
+            from: self.from,
+            to: self.to,
+        }
+    }
+}
+
+pub async fn requests(State(state): St, _: Admin, Query(q): Query<RequestQuery>) -> Result<Json<Vec<capture::Summary>>> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    Ok(Json(capture::list(&state.capture, &q.filter(), q.before, limit).await?))
+}
+
+pub async fn request(State(state): St, _: Admin, Path(id): Path<i64>) -> Result<Json<capture::Detail>> {
+    Ok(Json(capture::detail(&state.capture, id).await?.or_not_found()?))
+}
+
+pub async fn request_stats(State(state): St, _: Admin) -> Result<Json<capture::Stats>> {
+    Ok(Json(capture::stats(&state.capture).await?))
+}
+
+/// Every matching call in full, oldest first, one JSON object per line — streamed, so an
+/// export can be as big as the record.
+pub async fn export_requests(State(state): St, _: Admin, Query(q): Query<RequestQuery>) -> Response {
+    let filter = q.filter();
+    let lines = futures::stream::unfold(Some(0i64), move |after| {
+        let state = state.clone();
+        let filter = filter.clone();
+        async move {
+            let after = after?;
+            match capture::details_after(&state.capture, &filter, after, 50).await {
+                Ok(page) if page.is_empty() => None,
+                Ok(page) => {
+                    let next = page.last().map(|d| d.summary.id);
+                    let mut out = Vec::new();
+                    for d in &page {
+                        serde_json::to_writer(&mut out, d).ok();
+                        out.push(b'\n');
+                    }
+                    Some((Ok::<_, std::io::Error>(out), next))
+                }
+                Err(e) => Some((Err(std::io::Error::other(e)), None)),
+            }
+        }
+    });
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/x-ndjson")
+        .header(header::CONTENT_DISPOSITION, "attachment; filename=\"requests.jsonl\"")
+        .body(Body::from_stream(lines))
+        .unwrap()
 }

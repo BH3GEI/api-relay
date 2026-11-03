@@ -38,6 +38,8 @@
     </div>
 
     <div id="auth-msg" class="msg hidden"></div>
+    <p style="color:#666;font-size:12px;margin-top:12px;line-height:1.6">本服务会记录每次调用，包括请求和回复的内容；登录后可以在首页关闭内容记录。<br>
+    Calls through this relay are recorded, including their content; you can turn content recording off on the home page after signing in.</p>
   </div>
 </div>
 
@@ -117,6 +119,16 @@
         <p>在工具中将模型名设为下方列表中的任意一个即可。</p>
       </div>
     </div>
+  </div>
+
+  <!-- Recording -->
+  <div class="card">
+    <h2>请求记录 · Request recording</h2>
+    <p style="line-height:1.7">中转站会记录每次调用：时间、模型、token 数、耗时、状态、来源 IP，以及请求和回复的完整内容（你发的消息、系统提示、工具定义和模型的回答）。这些记录只有管理员能看，用于排查问题、改进服务和内部模型研究。</p>
+    <p style="line-height:1.7;color:#888;margin-top:8px">The relay records every call: time, model, tokens, timing, status, IP, and the full request and response (your messages, system prompt, tool definitions and the model's answers). Only the admin can see them; they are used for troubleshooting, improving the service and internal model research.</p>
+    <label style="display:block;margin-top:12px;cursor:pointer"><input type="checkbox" id="rec-content" onchange="setRecording(this.checked)" style="display:inline;width:auto;margin:0 8px 0 0;vertical-align:middle">记录请求和回复的内容 · Record request and response content</label>
+    <p style="color:#666;font-size:12px;margin-top:6px">关闭后，之后的调用只记时间、模型、token 数这类信息，不记内容；已经记下的不受影响。Turning it off applies to later calls; what was recorded stays.</p>
+    <div id="rec-msg" class="msg hidden" style="margin-top:8px"></div>
   </div>
 
   <!-- Usage -->
@@ -212,6 +224,7 @@
     <p>&bull; <code>GET /v1/user/api-key</code>，<code>POST /v1/user/api-key/refresh</code> — 查看 / 更换 API Key（旧 Key 立刻失效）</p>
     <p>&bull; <code>PUT /v1/user/password</code> — 改密码，body：<code>{"current_password": "…", "new_password": "…"}</code></p>
     <p>&bull; <code>GET /v1/user/config</code> — 应该填的 Base URL</p>
+    <p>&bull; <code>GET /v1/user/recording</code>，<code>PUT /v1/user/recording</code> — 查看 / 设置是否记录请求内容，body：<code>{"content": false}</code></p>
 
     <h3>遇到问题？</h3>
     <p>请联系本服务的管理员。</p>

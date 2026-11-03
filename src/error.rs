@@ -21,6 +21,15 @@ impl Error {
     pub fn api(status: StatusCode, kind: &'static str, message: impl Into<String>) -> Error {
         Error::Api { status, kind, message: message.into() }
     }
+
+    /// The status a client gets for this, and what went wrong, for the record.
+    pub fn describe(&self) -> (u16, String) {
+        match self {
+            Error::Status(s) => (s.as_u16(), s.canonical_reason().unwrap_or_default().to_string()),
+            Error::Api { status, message, .. } => (status.as_u16(), message.clone()),
+            Error::Internal(what) => (500, what.clone()),
+        }
+    }
 }
 
 impl From<StatusCode> for Error {

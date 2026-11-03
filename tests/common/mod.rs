@@ -141,8 +141,10 @@ impl Relay {
     pub async fn start() -> Relay {
         let path = std::env::temp_dir().join(format!("api-relay-test-{}-{}.db", std::process::id(), DB_SEQ.fetch_add(1, Ordering::SeqCst)));
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-capture", path.display()));
         let config = Config {
             database_url: format!("sqlite:{}?mode=rwc", path.display()),
+            capture_database_url: format!("sqlite:{}-capture?mode=rwc", path.display()),
             bind_addr: "unused".into(),
             public_bind_addr: Some("unused".into()),
             jwt_secret: Some("test-secret".into()),

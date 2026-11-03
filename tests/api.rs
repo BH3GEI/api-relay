@@ -4,7 +4,7 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{Relay, bearer};
-use serde_json::json;
+use serde_json::{Value, json};
 
 // ── Pages and what each listener serves ──
 
@@ -580,4 +580,85 @@ async fn usage_ranges_split_filter_and_compare() {
     let a = r.admin("GET", &format!("/admin/usage?from={t0}&to={}&user={amy}", t0 + 86400), None).await.json();
     assert_eq!(a["totals"]["total_tokens"], 1100);
     assert_eq!(a["present_users"].as_array().unwrap().len(), 2, "user choices ignore the user filter");
+}
+
+/// The admin's list of recorded calls, once it holds `n` (records are written in the background).
+async fn recorded(r: &Relay, n: usize) -> Value {
+    for _ in 0..100 {
+        let list = r.admin("GET", "/admin/requests", None).await.json();
+        if list.as_array().unwrap().len() >= n {
+            return list;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("fewer than {n} calls recorded");
+}
+
+#[tokio::test]
+async fn every_call_is_recorded_in_full_unless_the_user_opts_out() {
+    let r = Relay::start().await;
+    r.provider("fake", &["spent", "good"]).await;
+    let (user_id, key) = r.user("bob", "bobpassword1").await;
+    let auth = [("authorization", bearer(&key)), ("user-agent", "pi/1".to_string())];
+    let auth: Vec<(&str, &str)> = auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let system = "You are a careful agent. ".repeat(20);
+    let question = json!({ "role": "user", "content": "Explain the key pool. ".repeat(10) });
+    let turn1 = json!({ "model": "fake/m1", "messages": [{ "role": "system", "content": system }, question] });
+    let resp = r.public("POST", "/v1/chat/completions", &auth, Some(turn1)).await;
+    assert_eq!(resp.status, StatusCode::OK);
+
+    let list = recorded(&r, 1).await;
+    let call = &list[0];
+    assert_eq!((call["user_id"].as_i64(), call["username"].clone(), call["model"].clone(), call["provider"].clone()), (Some(user_id), json!("bob"), json!("fake/m1"), json!("fake")));
+    assert_eq!((call["status"].clone(), call["key"].clone(), call["entry"].clone(), call["client_ip"].clone()), (json!(200), json!("good"), json!("tunnel"), json!("198.51.100.1")));
+    assert_eq!((call["input_tokens"].clone(), call["output_tokens"].clone(), call["complete"].clone(), call["content"].clone()), (json!(10), json!(5), json!(true), json!(true)));
+    let detail = r.admin("GET", &format!("/admin/requests/{}", call["id"]), None).await.json();
+    // The request as sent upstream, with its shared parts back in place
+    assert_eq!(detail["request"], r.upstream.seen("/v1/chat/completions").last().unwrap().body);
+    assert!(detail["response"].as_str().unwrap().contains("\"ok\""));
+    assert_eq!(detail["user_agent"], "pi/1");
+    assert!(detail["headers"].get("authorization").is_none(), "credentials aren't kept");
+    let attempts: Vec<_> = detail["attempts"].as_array().unwrap().iter().map(|a| (a["key"].clone(), a["status"].clone(), a["failure"].clone())).collect();
+    assert_eq!(attempts, [(json!("pent"), json!(429), json!("OutOfQuota")), (json!("good"), json!(200), Value::Null)]);
+
+    // The next turn resends the conversation; only the new message is stored anew
+    let parts = r.admin("GET", "/admin/requests/stats", None).await.json()["parts"].as_i64().unwrap();
+    assert_eq!(parts, 2);
+    let answer = json!({ "role": "assistant", "content": "The pool tries keys in priority order. ".repeat(5) });
+    let turn2 = json!({ "model": "fake/m1", "stream": true, "messages": [{ "role": "system", "content": system }, question, answer] });
+    assert_eq!(r.public("POST", "/v1/chat/completions", &auth, Some(turn2)).await.status, StatusCode::OK);
+    let list = recorded(&r, 2).await;
+    assert_eq!((list[0]["stream"].clone(), list[0]["input_tokens"].clone(), list[0]["complete"].clone()), (json!(true), json!(20), json!(true)));
+    assert_eq!(r.admin("GET", "/admin/requests/stats", None).await.json()["parts"], 3);
+    let detail = r.admin("GET", &format!("/admin/requests/{}", list[0]["id"]), None).await.json();
+    assert_eq!(detail["request"]["messages"][2], answer);
+    assert!(detail["response"].as_str().unwrap().starts_with("data: "));
+
+    // The relay's own refusals are recorded too
+    let unknown = r.public("POST", "/v1/chat/completions", &auth, Some(json!({ "model": "nope", "messages": [] }))).await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    let list = recorded(&r, 3).await;
+    assert_eq!((list[0]["status"].clone(), list[0]["error"].clone()), (json!(404), json!("Unknown model nope")));
+
+    // Opted out: what a call was is still recorded, not what it said
+    assert_eq!(r.public("GET", "/v1/user/recording", &auth, None).await.json()["content"], true);
+    let off = r.public("PUT", "/v1/user/recording", &auth, Some(json!({ "content": false }))).await;
+    assert_eq!(off.json()["content"], false);
+    r.public("POST", "/v1/chat/completions", &auth, Some(json!({ "model": "fake/m1", "messages": [question] }))).await;
+    let list = recorded(&r, 4).await;
+    assert_eq!((list[0]["content"].clone(), list[0]["input_tokens"].clone()), (json!(false), json!(10)));
+    let detail = r.admin("GET", &format!("/admin/requests/{}", list[0]["id"]), None).await.json();
+    assert_eq!((detail["request"].clone(), detail["response"].clone()), (Value::Null, Value::Null));
+
+    // Filters, paging and the export
+    let errors = r.admin("GET", "/admin/requests?status=error", None).await.json();
+    assert_eq!(errors.as_array().unwrap().len(), 1);
+    let page = r.admin("GET", &format!("/admin/requests?limit=2&before={}", list[1]["id"]), None).await.json();
+    assert_eq!(page.as_array().unwrap().iter().map(|c| c["id"].clone()).collect::<Vec<_>>(), [list[2]["id"].clone(), list[3]["id"].clone()]);
+    let export = r.admin("GET", &format!("/admin/requests/export?user={user_id}&model=fake/*"), None).await;
+    let lines: Vec<Value> = export.text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[1]["request"]["messages"][2], answer);
+    // Users can't see the record
+    assert_eq!(r.lan("GET", "/admin/requests", &auth, None).await.status, StatusCode::UNAUTHORIZED);
 }

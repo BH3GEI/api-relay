@@ -29,6 +29,7 @@
     <button class="tab" onclick="showTab('providers')">Providers</button>
     <button class="tab" onclick="showTab('models')">Models</button>
     <button class="tab" onclick="showTab('usage')">Usage</button>
+    <button class="tab" onclick="showTab('requests')">Requests</button>
     <button class="tab" onclick="showTab('limits')">Limits</button>
     <button class="tab" onclick="showTab('tunnel')">Public Access</button>
   </div>
@@ -43,7 +44,7 @@
       <label style="color:#888;font-size:13px"><input type="checkbox" id="new-admin"> Admin</label>
       <button onclick="createUser()">Add User</button>
     </div>
-    <table><thead><tr><th>ID</th><th>Username</th><th>Email</th><th>API Key</th><th>Admin</th><th></th></tr></thead><tbody id="users-body"></tbody></table>
+    <table><thead><tr><th>ID</th><th>Username</th><th>Email</th><th>API Key</th><th>Admin</th><th title="Whether their requests and responses are recorded in full; users choose this on the home page">Content recorded</th><th></th></tr></thead><tbody id="users-body"></tbody></table>
   </div>
 
   <!-- Providers -->
@@ -85,6 +86,22 @@
     <h2>Usage</h2>
     <div id="usage-view"></div>
   </div>
+
+  <!-- Recorded calls -->
+  <div id="tab-requests" class="card hidden">
+    <h2>Requests</h2>
+    <p id="req-stats" style="color:#888;font-size:13px"></p>
+    <div style="margin:12px 0">
+      <select id="req-user" onchange="loadRequests()"><option value="">All users</option></select>
+      <input id="req-model" placeholder="Model, or provider/*" style="width:180px" onchange="loadRequests()">
+      <select id="req-status" onchange="loadRequests()"><option value="">Any status</option><option value="ok">OK</option><option value="error">Errors</option></select>
+      <button onclick="loadRequests()">Refresh</button>
+      <button class="secondary" onclick="exportRequests()" title="Every matching call in full, one JSON object per line">Export JSONL</button>
+    </div>
+    <table><thead><tr><th>Time</th><th>User</th><th>Model</th><th>Status</th><th>Key</th><th>Via</th><th>Tokens in / out</th><th>First byte</th><th>Total</th><th>Size</th></tr></thead><tbody id="req-body"></tbody></table>
+    <div style="margin-top:12px"><button class="secondary hidden" id="req-more" onclick="loadRequests(true)">Load more</button></div>
+  </div>
+  <div id="req-detail" class="hidden"></div>
 
   <!-- Public access -->
   <div id="tab-tunnel" class="card hidden">

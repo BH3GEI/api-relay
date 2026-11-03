@@ -4,7 +4,10 @@
 use super::Db;
 
 /// Steps after the first, each moving the schema from version N to N + 1.
-const STEPS: &[&[&str]] = &[];
+const STEPS: &[&[&str]] = &[
+    // 2: users can opt out of having their requests recorded in full
+    &["ALTER TABLE users ADD COLUMN record_content BOOLEAN NOT NULL DEFAULT TRUE"],
+];
 
 pub async fn migrate(db: &Db) {
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version").fetch_one(db).await.unwrap();

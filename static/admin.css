@@ -13,4 +13,13 @@ th { color: #888; font-weight: 600; white-space: nowrap; }
 td.actions { white-space: nowrap; text-align: right; }
 .url { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
 .url-label { color: #666; font-size: 11px; margin-right: 4px; }
-.tabs { display: flex; gap: 4px; margin-bottom: 20px; }
+.tabs { display: flex; gap: 4px; margin-bottom: 20px; flex-wrap: wrap; }
+#req-body tr { cursor: pointer; }
+#req-body tr:hover td { background: #202020; }
+#req-detail { position: fixed; inset: 24px; background: #111; border: 1px solid #333; border-radius: 8px; padding: 20px; overflow: auto; z-index: 10; }
+#req-detail pre { background: #0a0a0a; border: 1px solid #262626; border-radius: 6px; padding: 10px; font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 480px; overflow: auto; color: #ccc; }
+#req-detail .msg-role { color: #888; font-size: 12px; margin: 12px 0 4px; text-transform: uppercase; letter-spacing: .04em; }
+#req-detail details { margin-top: 8px; }
+#req-detail summary { cursor: pointer; color: #888; font-size: 13px; }
+.meta-grid { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 13px; }
+.meta-grid div:nth-child(odd) { color: #888; }

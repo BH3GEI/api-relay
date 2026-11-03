@@ -8,6 +8,7 @@
 
 mod acme;
 mod auth;
+mod capture;
 mod catalog;
 pub mod config;
 mod db;
@@ -38,6 +39,8 @@ use handlers::{admin, sign_in, user};
 
 pub struct AppState {
     pub db: sqlx::SqlitePool,
+    /// Every relayed call (see `capture`)
+    pub capture: capture::Store,
     jwt_secret: String,
     http_client: reqwest::Client,
     keys: pool::KeyPool,
@@ -85,6 +88,7 @@ impl App {
 
         let state = Arc::new(AppState {
             db,
+            capture: capture::open(&config.capture_database_url).await,
             jwt_secret,
             http_client,
             keys: pool::KeyPool::default(),
@@ -138,6 +142,10 @@ fn lan_routes() -> Routes {
         .route("/admin/catalog", get(admin::catalog))
         .route("/admin/catalog/refresh", post(admin::refresh_catalog))
         .route("/admin/usage", get(admin::usage))
+        .route("/admin/requests", get(admin::requests))
+        .route("/admin/requests/stats", get(admin::request_stats))
+        .route("/admin/requests/export", get(admin::export_requests))
+        .route("/admin/requests/:id", get(admin::request))
         .route("/admin/limits", get(admin::limits).post(admin::set_limit))
         .route("/admin/limits/:id", delete(admin::delete_limit))
         .route("/admin/tunnel", get(admin::tunnel).put(admin::set_tunnel))
@@ -164,6 +172,7 @@ fn user_routes(prefix: &str) -> Routes {
         .route(&format!("{prefix}/usage"), get(user::usage))
         .route(&format!("{prefix}/quota"), get(user::quota))
         .route(&format!("{prefix}/config"), get(user::config))
+        .route(&format!("{prefix}/recording"), get(user::recording).put(user::set_recording))
 }
 
 /// The API, for clients signing with their key, which is checked before the body is read.

@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 use crate::{
     AppState,
+    capture::Capture,
     db::{self, Db, providers::Provider, users::User},
     error::{Error, Result},
-    extract::Caller,
+    extract::{Caller, Origin},
     pool, tokens,
 };
 
@@ -58,6 +59,18 @@ impl Endpoint {
         }
     }
 
+    /// How the record of a call names it.
+    fn name(self) -> &'static str {
+        match self {
+            Endpoint::ChatCompletions => "chat_completions",
+            Endpoint::Responses => "responses",
+            Endpoint::Messages => "messages",
+            Endpoint::CountTokens => "count_tokens",
+            Endpoint::Images => "images",
+            Endpoint::Videos => "videos",
+        }
+    }
+
     /// Text endpoints, whose responses report token usage.
     fn is_text(self) -> bool {
         !matches!(self, Endpoint::Images | Endpoint::Videos)
@@ -69,45 +82,58 @@ impl Endpoint {
     }
 }
 
-pub async fn chat_completions(state: State<Arc<AppState>>, caller: Caller, headers: HeaderMap, body: String) -> Result<Response> {
-    relay(state, caller, headers, body, Endpoint::ChatCompletions).await
+pub async fn chat_completions(state: State<Arc<AppState>>, caller: Caller, origin: Origin, headers: HeaderMap, body: String) -> Result<Response> {
+    relay(state, caller, origin, headers, body, Endpoint::ChatCompletions).await
 }
 
-pub async fn responses(state: State<Arc<AppState>>, caller: Caller, headers: HeaderMap, body: String) -> Result<Response> {
-    relay(state, caller, headers, body, Endpoint::Responses).await
+pub async fn responses(state: State<Arc<AppState>>, caller: Caller, origin: Origin, headers: HeaderMap, body: String) -> Result<Response> {
+    relay(state, caller, origin, headers, body, Endpoint::Responses).await
 }
 
-pub async fn messages(state: State<Arc<AppState>>, caller: Caller, headers: HeaderMap, body: String) -> Result<Response> {
-    relay(state, caller, headers, body, Endpoint::Messages).await
+pub async fn messages(state: State<Arc<AppState>>, caller: Caller, origin: Origin, headers: HeaderMap, body: String) -> Result<Response> {
+    relay(state, caller, origin, headers, body, Endpoint::Messages).await
 }
 
-pub async fn count_tokens(state: State<Arc<AppState>>, caller: Caller, headers: HeaderMap, body: String) -> Result<Response> {
-    relay(state, caller, headers, body, Endpoint::CountTokens).await
+pub async fn count_tokens(state: State<Arc<AppState>>, caller: Caller, origin: Origin, headers: HeaderMap, body: String) -> Result<Response> {
+    relay(state, caller, origin, headers, body, Endpoint::CountTokens).await
 }
 
-pub async fn image_generations(state: State<Arc<AppState>>, caller: Caller, headers: HeaderMap, body: String) -> Result<Response> {
-    relay(state, caller, headers, body, Endpoint::Images).await
+pub async fn image_generations(state: State<Arc<AppState>>, caller: Caller, origin: Origin, headers: HeaderMap, body: String) -> Result<Response> {
+    relay(state, caller, origin, headers, body, Endpoint::Images).await
 }
 
-pub async fn video_generations(state: State<Arc<AppState>>, caller: Caller, headers: HeaderMap, body: String) -> Result<Response> {
-    relay(state, caller, headers, body, Endpoint::Videos).await
+pub async fn video_generations(state: State<Arc<AppState>>, caller: Caller, origin: Origin, headers: HeaderMap, body: String) -> Result<Response> {
+    relay(state, caller, origin, headers, body, Endpoint::Videos).await
 }
 
-async fn relay(State(state): State<Arc<AppState>>, Caller(user): Caller, headers: HeaderMap, body: String, endpoint: Endpoint) -> Result<Response> {
+/// Relay one call, and record it whatever becomes of it.
+async fn relay(State(state): State<Arc<AppState>>, Caller(user): Caller, origin: Origin, headers: HeaderMap, body: String, endpoint: Endpoint) -> Result<Response> {
+    let mut capture = Capture::start(&state.capture, &user, &origin, &headers, endpoint.name(), &body);
+    let result = forward(&state, &user, &headers, body, endpoint, &mut capture).await;
+    if let Err(e) = &result {
+        capture.failed(e);
+    }
+    result
+}
+
+async fn forward(state: &AppState, user: &User, headers: &HeaderMap, body: String, endpoint: Endpoint, capture: &mut Capture) -> Result<Response> {
     let mut body: Value = serde_json::from_str(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let requested = body["model"].as_str().ok_or(StatusCode::BAD_REQUEST)?.to_string();
-    let (provider, entry) = state.catalog.resolve(&state, &requested).await
+    capture.model(&requested);
+    let (provider, entry) = state.catalog.resolve(state, &requested).await
         .ok_or_else(|| Error::api(StatusCode::NOT_FOUND, "not_found_error", format!("Unknown model {requested}")))?;
+    let stream = body["stream"].as_bool().unwrap_or(false);
+    capture.route(&provider.name, &entry.upstream_model, stream);
     // Limits and usage go by the catalog id, so `m1` and `kimi/m1` count as one model
-    let usage = admit(&state, &user, &entry.id, endpoint.counts()).await?;
+    let usage = admit(state, user, &entry.id, endpoint.counts()).await?;
 
     body["model"] = Value::String(entry.upstream_model.clone());
-    let stream = body["stream"].as_bool().unwrap_or(false);
     if stream && endpoint == Endpoint::ChatCompletions && body.get("stream_options").is_none() {
         // Without this, streamed Chat Completions never report token usage
         body["stream_options"] = serde_json::json!({ "include_usage": true });
     }
     let body = body.to_string();
+    capture.sent(&body);
 
     let (url, key_header) = endpoint.upstream(&provider, &entry.upstream_model);
     // Anthropic clients pick the API version and opt into beta features per request
@@ -115,7 +141,8 @@ async fn relay(State(state): State<Arc<AppState>>, Caller(user): Caller, headers
     let anthropic_beta = headers.get("anthropic-beta").and_then(|v| v.to_str().ok());
 
     let keys = db::providers::usable_keys(&state.db, provider.id).await?;
-    let sent = state.keys.send(keys, |key| {
+    let mut attempts = Vec::new();
+    let sent = state.keys.send(keys, &mut attempts, |key| {
         let mut req = state.http_client.post(&url)
             .header("Content-Type", "application/json")
             .header("User-Agent", &provider.user_agent)
@@ -135,6 +162,7 @@ async fn relay(State(state): State<Arc<AppState>>, Caller(user): Caller, headers
             }
         }
     }).await;
+    capture.attempts(attempts);
 
     let resp = match sent {
         Ok(resp) if resp.status().is_success() => resp,
@@ -144,22 +172,26 @@ async fn relay(State(state): State<Arc<AppState>>, Caller(user): Caller, headers
                 usage.discard().await;
             }
             return match refused {
-                Ok(resp) => pass_through(resp, None),
+                Ok(resp) => pass_through(resp, None, capture.take()),
                 Err(e) => Err(exhausted(e)),
             };
         }
     };
     match usage {
-        Some(usage) if endpoint.is_text() && stream => pass_through(resp, Some(usage.on_stream())),
+        Some(usage) if endpoint.is_text() && stream => pass_through(resp, Some(usage), capture.take()),
         Some(usage) if endpoint.is_text() => {
             let status = resp.status();
+            capture.answer(status.as_u16());
             let bytes = resp.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+            capture.chunk(&bytes);
             let (input, output) = tokens::from_body(&bytes);
+            capture.tokens(input, output);
+            capture.complete();
             usage.finish(input, output).await;
             Ok(Response::builder().status(status).header(header::CONTENT_TYPE, "application/json").body(Body::from(bytes)).unwrap())
         }
         // Generated media report no tokens; the request is what counts
-        _ => pass_through(resp, None),
+        _ => pass_through(resp, None, capture.take()),
     }
 }
 
@@ -177,25 +209,31 @@ impl Usage {
     async fn discard(self) {
         let _ = db::usage::discard(&self.db, self.id).await;
     }
+}
 
-    fn on_stream(self) -> StreamUsage {
-        StreamUsage { usage: Some(self), scanner: Default::default() }
+/// Watches a response as it streams out: picks token counts out of it, and records them and
+/// the call when the stream is done — even if the client hangs up first.
+struct Tap {
+    usage: Option<Usage>,
+    scanner: tokens::StreamScanner,
+    capture: Capture,
+}
+
+impl Tap {
+    fn feed(&mut self, bytes: &[u8]) {
+        self.scanner.feed(bytes);
+        self.capture.chunk(bytes);
     }
 }
 
-/// Picks token counts out of a stream as it passes, and records them when the stream is
-/// done — even if the client hangs up first.
-struct StreamUsage {
-    usage: Option<Usage>,
-    scanner: tokens::StreamScanner,
-}
-
-impl Drop for StreamUsage {
+impl Drop for Tap {
     fn drop(&mut self) {
+        let (input, output) = (self.scanner.input, self.scanner.output);
+        self.capture.tokens(input, output);
         if let Some(usage) = self.usage.take() {
-            let (input, output) = (self.scanner.input, self.scanner.output);
             tokio::spawn(usage.finish(input, output));
         }
+        // The capture records itself as it is dropped, right after this
     }
 }
 
@@ -227,14 +265,24 @@ fn exhausted(e: pool::Exhausted) -> Error {
 }
 
 /// The upstream's response as it streams in, with its status and content type.
-fn pass_through(resp: reqwest::Response, mut usage: Option<StreamUsage>) -> Result<Response> {
+fn pass_through(resp: reqwest::Response, usage: Option<Usage>, mut capture: Capture) -> Result<Response> {
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    capture.answer(status.as_u16());
     let content_type = resp.headers().get(header::CONTENT_TYPE).cloned();
-    let stream = resp.bytes_stream().map(move |chunk| {
-        if let (Ok(bytes), Some(u)) = (&chunk, usage.as_mut()) {
-            u.scanner.feed(bytes);
+    let tap = Tap { usage, scanner: Default::default(), capture };
+    let stream = futures::stream::unfold((resp.bytes_stream(), tap), |(mut chunks, mut tap)| async move {
+        match chunks.next().await {
+            Some(chunk) => {
+                if let Ok(bytes) = &chunk {
+                    tap.feed(bytes);
+                }
+                Some((chunk.map_err(std::io::Error::other), (chunks, tap)))
+            }
+            None => {
+                tap.capture.complete();
+                None
+            }
         }
-        chunk.map_err(std::io::Error::other)
     });
     let mut builder = Response::builder().status(status);
     if let Some(ct) = content_type {

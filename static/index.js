@@ -62,6 +62,16 @@ function isAdmin() {
   } catch { return false; }
 }
 
+async function setRecording(on) {
+  try {
+    await api('/user/recording', { method: 'PUT', body: JSON.stringify({ content: on }) });
+    showMsg('rec-msg', on ? '已开启内容记录 · Content recording on' : '已关闭内容记录 · Content recording off', true);
+  } catch (e) {
+    document.getElementById('rec-content').checked = !on;
+    showMsg('rec-msg', '设置失败 · Failed: ' + e.message, false);
+  }
+}
+
 async function loadDashboard() {
   const showAdmin = isAdmin() && !PUBLIC;
   document.getElementById('admin-link').classList.toggle('hidden', !showAdmin);
@@ -85,6 +95,10 @@ async function loadDashboard() {
     document.getElementById('cfg-lan-row').classList.toggle('hidden', SHOW === BASE);
     document.getElementById('cfg-lan').textContent = BASE;
     document.getElementById('cfg-key').textContent = apiKey;
+
+    try {
+      document.getElementById('rec-content').checked = (await api('/user/recording')).content;
+    } catch (e) {}
 
     usageView ||= UsageView.mount(document.getElementById('usage-view'), { lang: 'zh', fetch: q => api('/user/usage?' + q) });
     usageView.load();

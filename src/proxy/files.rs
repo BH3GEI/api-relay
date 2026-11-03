@@ -55,14 +55,14 @@ async fn forward(state: &AppState, Caller(user): Caller, headers: &HeaderMap, me
     let url = format!("{MOONSHOT}{path}");
     let content_type = headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream");
 
-    let sent = state.keys.send(keys, |key| {
+    let sent = state.keys.send(keys, &mut Vec::new(), |key| {
         state.http_client.request(method.clone(), &url)
             .header("Content-Type", content_type)
             .header("Authorization", format!("Bearer {key}"))
             .body(body.clone())
     }).await;
     match sent {
-        Ok(resp) => super::pass_through(resp, None),
+        Ok(resp) => super::pass_through(resp, None, Default::default()),
         Err(e) => Err(super::exhausted(e)),
     }
 }

@@ -24,6 +24,25 @@ pub struct Exhausted {
     pub last_status: Option<u16>,
 }
 
+/// One try of one key, for the record of the call.
+#[derive(Clone, Serialize)]
+pub struct Attempt {
+    /// The key's last few characters
+    pub key: String,
+    /// The upstream's status; None when it couldn't be reached
+    pub status: Option<u16>,
+    /// This key's answer is the one passed on
+    pub served: bool,
+    /// Why it was passed over (Busy, OutOfQuota, …)
+    pub failure: Option<String>,
+    /// The upstream's error, or the network error
+    pub detail: Option<String>,
+    pub ms: u64,
+}
+
+/// How much of an upstream's error answer an attempt keeps
+const DETAIL_MAX: usize = 2000;
+
 /// What the pool has seen of one key since the relay started.
 #[derive(Default, Clone, Serialize)]
 pub struct KeyStatus {
@@ -76,11 +95,12 @@ impl KeyPool {
     }
 
     /// Send with each key in turn until one gets a response worth returning.
-    /// `build` makes the request for a given key; it is called once per attempt.
+    /// `build` makes the request for a given key; it is called once per attempt, and each
+    /// attempt is added to `attempts`.
     ///
     /// Keys that were only busy (at their concurrency limit) are tried again for a while
     /// before giving up, so a burst waits its turn instead of failing.
-    pub async fn send<F>(&self, keys: Vec<String>, build: F) -> Result<reqwest::Response, Exhausted>
+    pub async fn send<F>(&self, keys: Vec<String>, attempts: &mut Vec<Attempt>, build: F) -> Result<reqwest::Response, Exhausted>
     where
         F: Fn(&str) -> reqwest::RequestBuilder,
     {
@@ -90,9 +110,16 @@ impl KeyPool {
         for round in 1u32.. {
             let mut busy = Vec::new();
             for key in &keys {
+                let tried = Instant::now();
+                let mut attempt = |status, served, failure: Option<String>, detail: Option<String>| attempts.push(Attempt {
+                    key: tail(key).to_string(), status, served, failure,
+                    detail: detail.map(|d| d.chars().take(DETAIL_MAX).collect()),
+                    ms: tried.elapsed().as_millis() as u64,
+                });
                 let resp = match build(key).send().await {
                     Ok(r) => r,
                     Err(e) => {
+                        attempt(None, false, None, Some(e.to_string()));
                         eprintln!("key …{}: request failed ({e:?}), cooling 10s", tail(key));
                         self.record(key, "network error".into(), false);
                         self.cool(key, Duration::from_secs(10), false);
@@ -104,12 +131,15 @@ impl KeyPool {
                     // Anything we don't retry (including a 400 for a bad request) means the key works
                     self.record(key, status.to_string(), true);
                     self.cooldowns.lock().unwrap().remove(key);
+                    attempt(Some(status), true, None, None);
                     return Ok(resp);
                 }
                 self.record(key, status.to_string(), false);
                 let retry_after = retry_after(&resp);
                 // The body isn't passed on: upstream errors can name the account behind the key
-                let failure = Failure::of(status, &resp.text().await.unwrap_or_default());
+                let body = resp.text().await.unwrap_or_default();
+                let failure = Failure::of(status, &body);
+                attempt(Some(status), false, Some(format!("{failure:?}")), Some(body));
                 let dur = failure.cooldown(retry_after);
                 eprintln!("key …{}: upstream {status} ({failure:?}), cooling {}s", tail(key), dur.as_secs());
                 self.cool(key, dur, matches!(failure, Failure::OutOfQuota | Failure::Refused));

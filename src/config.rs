@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 pub struct Config {
     pub database_url: String,
+    /// Where every relayed call is recorded, apart from the relay's own data
+    pub capture_database_url: String,
     /// The main listener: pages, admin and API, behind LazyCat's gateway when on LazyCat
     pub bind_addr: String,
     /// Optional second listener for internet traffic (a Cloudflare Tunnel)
@@ -25,6 +27,7 @@ impl Config {
         let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         Config {
             database_url: var("DATABASE_URL").unwrap_or_else(|| "sqlite:relay.db?mode=rwc".into()),
+            capture_database_url: var("CAPTURE_DATABASE_URL").unwrap_or_else(|| "sqlite:capture.db?mode=rwc".into()),
             bind_addr: var("BIND_ADDR").unwrap_or_else(|| "0.0.0.0:3000".into()),
             public_bind_addr: var("PUBLIC_BIND_ADDR"),
             jwt_secret: var("JWT_SECRET"),

@@ -12,9 +12,11 @@ pub struct User {
     pub api_key: String,
     pub is_admin: bool,
     pub created_at: String,
+    /// Whether their requests and responses are recorded in full; metadata always is
+    pub record_content: bool,
 }
 
-const COLUMNS: &str = "id, username, email, password_hash, api_key, is_admin, created_at";
+const COLUMNS: &str = "id, username, email, password_hash, api_key, is_admin, created_at, record_content";
 
 pub async fn list(db: &Db) -> sqlx::Result<Vec<User>> {
     sqlx::query_as(&format!("SELECT {COLUMNS} FROM users ORDER BY id")).fetch_all(db).await
@@ -65,6 +67,11 @@ pub async fn set_api_key(db: &Db, id: i64, api_key: &str) -> sqlx::Result<()> {
 pub async fn set_password_hash(db: &Db, id: i64, password_hash: &str) -> sqlx::Result<bool> {
     let r = sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?").bind(password_hash).bind(id).execute(db).await?;
     Ok(r.rows_affected() > 0)
+}
+
+pub async fn set_record_content(db: &Db, id: i64, on: bool) -> sqlx::Result<()> {
+    sqlx::query("UPDATE users SET record_content = ? WHERE id = ?").bind(on).bind(id).execute(db).await?;
+    Ok(())
 }
 
 pub async fn set_admin(db: &Db, id: i64, is_admin: bool) -> sqlx::Result<()> {

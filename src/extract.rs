@@ -18,6 +18,8 @@ pub struct PublicListener;
 /// Which listener a request came in on, and the caller's address as its proxy reports it.
 pub struct Origin {
     pub public: bool,
+    /// Came through frp (which also counts as public)
+    pub frp: bool,
     pub ip: Option<String>,
 }
 
@@ -33,12 +35,13 @@ impl Origin {
 
     fn from_parts(parts: &Parts) -> Origin {
         let public = parts.extensions.get::<PublicListener>().is_some();
+        let via_frp = parts.extensions.get::<frp::FrpClient>();
         // Through frp the address comes from frpc, never from headers a client could set
-        let ip = match parts.extensions.get::<frp::FrpClient>() {
+        let ip = match via_frp {
             Some(frp::FrpClient(ip)) => ip.clone(),
             None => guard::client_ip(&parts.headers, public),
         };
-        Origin { public, ip }
+        Origin { public, frp: via_frp.is_some(), ip }
     }
 }
 
