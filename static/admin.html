@@ -96,7 +96,7 @@
       <input id="req-model" placeholder="Model, or provider/*" style="width:180px" onchange="loadRequests()">
       <select id="req-status" onchange="loadRequests()"><option value="">Any status</option><option value="ok">OK</option><option value="error">Errors</option></select>
       <button onclick="loadRequests()">Refresh</button>
-      <button class="secondary" onclick="exportRequests()" title="Every matching call in full, one JSON object per line">Export JSONL</button>
+      <button class="secondary" id="req-export" onclick="exportRequests()" title="Every matching call in full, one JSON object per line; the size is an estimate">Export JSONL</button>
     </div>
     <table><thead><tr><th>Time</th><th>User</th><th>Model</th><th>Status</th><th>Key</th><th>Via</th><th>Tokens in / out</th><th>First byte</th><th>Total</th><th>Size</th></tr></thead><tbody id="req-body"></tbody></table>
     <div style="margin-top:12px"><button class="secondary hidden" id="req-more" onclick="loadRequests(true)">Load more</button></div>

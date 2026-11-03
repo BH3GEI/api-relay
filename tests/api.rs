@@ -503,9 +503,11 @@ async fn usage_is_bucketed_by_the_viewers_calendar() {
     assert!(requests(&month) >= 5 && requests(&year) >= requests(&month) && requests(&year) <= 6, "{month} {year}");
     assert!(day["series"][0]["bucket"].as_str().unwrap().ends_with(" 00"), "{day}");
     assert!(brief(&day["models"]).as_array().unwrap().contains(&json!({ "model": "b/y", "requests": 1, "total_tokens": 10 })), "{day}");
-    // Viewed from UTC, 00:30 in UTC+8 is 16:30 the day before
+    // Viewed from UTC, 00:30 in UTC+8 is 16:30 the day before: in UTC's today only while UTC is
+    // still on that day (00:00–08:00 in UTC+8)
     let utc_day = r.public("GET", "/v1/user/usage?period=day&tz=0", &h, None).await.json();
-    assert!(!utc_day["models"].as_array().unwrap().iter().any(|m| m["model"] == "b/y"), "{utc_day}");
+    let in_utc_today = day["from"].as_i64().unwrap() + 30 * 60 >= utc_day["from"].as_i64().unwrap();
+    assert_eq!(utc_day["models"].as_array().unwrap().iter().any(|m| m["model"] == "b/y"), in_utc_today, "{utc_day}");
 
     let admin = r.admin("GET", "/admin/usage?period=day&tz=480", None).await.json();
     assert!(admin["rows"].as_array().unwrap().len() == 2, "{admin}");
@@ -662,6 +664,10 @@ async fn every_call_is_recorded_in_full_unless_the_user_opts_out() {
     let lines: Vec<Value> = export.text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
     assert_eq!(lines.len(), 3);
     assert_eq!(lines[1]["request"]["messages"][2], answer);
+    // The estimate counts the requests and responses, which the export adds its metadata to
+    let size = r.admin("GET", &format!("/admin/requests/export/size?user={user_id}&model=fake/*"), None).await.json();
+    let bytes = size["bytes"].as_u64().unwrap() as usize;
+    assert!(bytes > 0 && bytes < export.text.len(), "{bytes} vs {}", export.text.len());
     // Users can't see the record
     assert_eq!(r.lan("GET", "/admin/requests", &auth, None).await.status, StatusCode::UNAUTHORIZED);
 }

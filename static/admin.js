@@ -394,6 +394,9 @@ function statusCell(c) {
 async function loadRequests(more) {
   if (!more) {
     reqOldest = null;
+    const exp = document.getElementById('req-export');
+    exp.textContent = 'Export JSONL';
+    api('/admin/requests/export/size?' + reqFilter()).then(s => { exp.textContent = `Export JSONL (≈ ${fmtBytes(s.bytes)})`; }).catch(() => {});
     api('/admin/requests/stats').then(s => {
       const since = s.since ? ' since ' + new Date(s.since).toLocaleDateString() : '';
       document.getElementById('req-stats').textContent =

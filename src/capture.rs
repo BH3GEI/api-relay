@@ -419,6 +419,14 @@ pub async fn list(store: &Store, filter: &Filter, before: Option<i64>, limit: i6
     q.build_query_as().fetch_all(store).await
 }
 
+/// Roughly how big an export of the matching calls is: their requests and responses as sent.
+pub async fn export_bytes(store: &Store, filter: &Filter) -> sqlx::Result<i64> {
+    let mut q = QueryBuilder::new("SELECT COALESCE(SUM(CASE WHEN content THEN request_bytes + response_bytes ELSE 0 END), 0) FROM requests");
+    filter.push(&mut q);
+    let (bytes,): (i64,) = q.build_query_as().fetch_one(store).await?;
+    Ok(bytes)
+}
+
 /// Oldest first, after the record `after`; for exports.
 pub async fn details_after(store: &Store, filter: &Filter, after: i64, limit: i64) -> sqlx::Result<Vec<Detail>> {
     let mut q = QueryBuilder::new("SELECT id FROM requests");

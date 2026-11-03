@@ -293,6 +293,16 @@ pub async fn request_stats(State(state): St, _: Admin) -> Result<Json<capture::S
     Ok(Json(capture::stats(&state.capture).await?))
 }
 
+#[derive(Serialize)]
+pub struct ExportSize {
+    bytes: i64,
+}
+
+/// About how big the export would be, as the download itself can't say.
+pub async fn export_size(State(state): St, _: Admin, Query(q): Query<RequestQuery>) -> Result<Json<ExportSize>> {
+    Ok(Json(ExportSize { bytes: capture::export_bytes(&state.capture, &q.filter()).await? }))
+}
+
 /// Every matching call in full, oldest first, one JSON object per line — streamed, so an
 /// export can be as big as the record.
 pub async fn export_requests(State(state): St, _: Admin, Query(q): Query<RequestQuery>) -> Response {

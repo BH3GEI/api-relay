@@ -145,6 +145,7 @@ fn lan_routes() -> Routes {
         .route("/admin/requests", get(admin::requests))
         .route("/admin/requests/stats", get(admin::request_stats))
         .route("/admin/requests/export", get(admin::export_requests))
+        .route("/admin/requests/export/size", get(admin::export_size))
         .route("/admin/requests/:id", get(admin::request))
         .route("/admin/limits", get(admin::limits).post(admin::set_limit))
         .route("/admin/limits/:id", delete(admin::delete_limit))
