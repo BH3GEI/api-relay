@@ -21,6 +21,9 @@ async fn listeners_serve_their_own_surfaces() {
     assert_eq!(r.public("GET", "/admin", &[], None).await.status, StatusCode::NOT_FOUND);
     let auth = bearer(&r.admin);
     assert_eq!(r.public("GET", "/admin/users", &[("authorization", &auth)], None).await.status, StatusCode::NOT_FOUND);
+    // Behind the gateway its headers alone make an admin (a plain download link); not a LazyCat user's
+    assert_eq!(r.lan("GET", "/admin/users", &forged, None).await.status, StatusCode::OK);
+    assert_eq!(r.lan("GET", "/admin/users", &[("x-hc-user-id", "someone")], None).await.status, StatusCode::UNAUTHORIZED);
 
     let lan = r.lan("GET", "/auth/options", &[], None).await.json();
     assert_eq!(lan, json!({ "public": false, "register": false }));

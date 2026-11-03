@@ -133,7 +133,7 @@ fn is_event(line: &str) -> bool {
 }
 
 /// "2026-10-24T10:41:15Z"
-fn now_utc() -> String {
+pub fn now_utc() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
     let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
     // Civil date from days since the epoch (Howard Hinnant's algorithm)

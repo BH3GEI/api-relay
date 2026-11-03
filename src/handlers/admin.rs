@@ -319,7 +319,7 @@ pub async fn export_requests(State(state): St, _: Admin, Query(q): Query<Request
     });
     Response::builder()
         .header(header::CONTENT_TYPE, "application/x-ndjson")
-        .header(header::CONTENT_DISPOSITION, "attachment; filename=\"requests.jsonl\"")
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"requests-{}.jsonl\"", tunnel::now_utc().replace(['-', ':'], "")))
         .body(Body::from_stream(lines))
         .unwrap()
 }

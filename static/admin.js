@@ -496,14 +496,9 @@ async function showRequest(id) {
 }
 function closeRequest() { document.getElementById('req-detail').classList.add('hidden'); }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeRequest(); });
-// Downloads through the page, so it carries the session; for very large exports use the API with curl
-async function exportRequests() {
-  const r = await fetch(BASE + '/admin/requests/export?' + reqFilter(), { headers: { 'Authorization': 'Bearer ' + token } });
-  if (!r.ok) { alert('Export failed: ' + r.status); return; }
-  const url = URL.createObjectURL(await r.blob());
-  const a = document.createElement('a');
-  a.href = url; a.download = 'requests.jsonl'; a.click();
-  URL.revokeObjectURL(url);
+// A plain link, so the browser saves it straight to disk; LazyCat's gateway vouches for the admin
+function exportRequests() {
+  location.href = BASE + '/admin/requests/export?' + reqFilter();
 }
 
 function logout() {

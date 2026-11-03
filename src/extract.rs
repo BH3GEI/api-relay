@@ -77,6 +77,12 @@ impl FromRequestParts<Arc<AppState>> for Admin {
     type Rejection = Error;
 
     async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Admin> {
+        // Behind LazyCat's gateway its headers are enough (as for /auth/sso), so a plain link,
+        // such as a download, works without the page's token
+        let gateway = state.lazycat && parts.extensions.get::<PublicListener>().is_none();
+        if gateway && parts.headers.get("x-hc-user-role").is_some_and(|r| r == "ADMIN") {
+            return Ok(Admin);
+        }
         let Session(user) = Session::from_request_parts(parts, state).await?;
         if !user.is_admin {
             return Err(StatusCode::FORBIDDEN.into());
