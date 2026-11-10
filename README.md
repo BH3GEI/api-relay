@@ -35,6 +35,10 @@ Rust 单二进制 + SQLite，可以独立运行，也可以打包成懒猫微服
 
 - **多用户**：每人一把 key（形如 `sk-<用户名>-relay-<随机串>`），各自的用量统计和每日限额。
 
+- **服务商并发上限**：每个服务商可以设最多同时转发多少个请求。超出的请求排队等空位，不直接失败；等太久（默认 120 秒）才返回 429。
+
+- **请求追溯**：客户端用 `X-Octo-Actor`、`X-Octo-Task`、`X-Octo-Run` 头标明"谁、为哪个任务、第几轮"，随用量记录一起存下，后台可按这些字段查询和导出 CSV。还可以把请求体和响应体存到磁盘，供事后分析。见[多 agent 集群](#多-agent-集群octoloop)。
+
 ## 模型名
 
 模型名就是 `<服务商名>/<上游模型 id>`，例如 `kimi/k3`、`zhipu/glm-5.3`、`ark/ark-code-latest`。只有一家服务商提供某个模型时，可以省略前缀直接写 `k3`。
@@ -51,6 +55,7 @@ Rust 单二进制 + SQLite，可以独立运行，也可以打包成懒猫微服
 | Anthropic Base URL | 可选。`/v1/messages` 接在它后面。不填时用 OpenAI Base URL 去掉末尾的 `/v1` |
 | Extra Models | 可选。上游没有 `/models` 接口时，在这里手动列出模型名，逗号分隔 |
 | User-Agent | 发给上游的 User-Agent，部分编程套餐会校验 |
+| Max concurrency | 可选。最多同时有几个请求发往这个服务商，不填表示不限。列表里显示"在途 / 上限"，点 Edit 修改 |
 
 几家常见上游的地址：
 
@@ -115,6 +120,85 @@ Base URL 填 `https://relay.example.com/v1`，key 填你的 relay key，模型�
 - 没设限额的用户不限量。所有用户共用同一组上游 key。
 - 管理后台的 Keys 列表会显示每把 key 在上游的 5 小时 / 每周额度用了多少（目前支持 Kimi 和智谱），可以用来估算"一把 key 的额度相当于多少 token"。
 
+## 多 agent 集群（octoloop）
+
+几十个 agent 同时跑时，relay 可以当整个集群的统一模型出口：限住每个服务商的并发，并记下每个请求是谁发的。
+
+### 每个署名一个用户
+
+每个 agent 署名（如 `lane-m07-a`、`m07-ver`、`outer`）在 Users 页建一个同名用户，用它自己的 key。这样用量、限额、key 吊销都按署名分开；某条车道失控时，只需在 Limits 页限它一个，或删掉这个用户。
+
+### 服务商并发上限
+
+编程套餐对单账号的并发很敏感，太多会被限流甚至封号。在 Providers 页给服务商填 Max concurrency（例如 Kimi 填 8）：
+
+- 在途请求达到上限时，新请求排队，有空位就继续转发，客户端只是等得久一点。
+- 排队超过 `RELAY_QUEUE_TIMEOUT_SECS`（默认 120 秒）返回 429，带 `Retry-After: 10`，不计入用户用量。Claude Code、Codex 收到 429 会自己退避重试。
+- 流式请求在流结束或客户端断开时才让出名额；上游出错、所有 key 都失败时也会立即让出。
+- 上限是按服务商算的，不是按 key：同一服务商下的多把 key 共用这个上限。改了上限立即生效，正在排队的请求也按新值算。
+
+车道 profile 里再配好 fallbacks（例如 `kimi/k3` 之后是 `zhipu/glm-5.3`），一家排满时 agent 可以换另一家。
+
+### 请求追溯头
+
+| 请求头 | 含义 | 例子 |
+|---|---|---|
+| `X-Octo-Actor` | 署名 | `lane-m07-a` |
+| `X-Octo-Task` | 任务 | `M07` |
+| `X-Octo-Run` | 一次运行 | `2026-11-10-r3` |
+
+这三个头存进用量记录的 `actor`、`task`、`run` 列，不会转发给上游。每个值最多 128 个字符，只保留可打印 ASCII 和常见中文，其余字符直接丢掉。不带这些头的请求照常转发，这几列为空。
+
+Claude Code 用 `ANTHROPIC_CUSTOM_HEADERS`，多个头用换行分隔：
+
+```bash
+export ANTHROPIC_BASE_URL=https://relay.example.com
+export ANTHROPIC_AUTH_TOKEN=sk-lane-m07-a-relay-xxx
+export ANTHROPIC_MODEL=kimi/k3
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=kimi/k3
+export ANTHROPIC_CUSTOM_HEADERS=$'X-Octo-Actor: lane-m07-a\nX-Octo-Task: M07\nX-Octo-Run: 2026-11-10-r3'
+```
+
+Codex 在 provider 里配 `http_headers`（固定值）或 `env_http_headers`（从环境变量取值，适合每轮都变的 task、run）：
+
+```toml
+[model_providers.relay]
+base_url = "https://relay.example.com/v1"
+wire_api = "responses"
+env_key = "RELAY_KEY"
+http_headers = { "X-Octo-Actor" = "m07-ver" }
+env_http_headers = { "X-Octo-Task" = "OCTO_TASK", "X-Octo-Run" = "OCTO_RUN" }
+```
+
+### 查询和导出
+
+管理后台 Usage 页可以按 Actor、Task 过滤今天的用量，Export CSV 导出最近 7 天的逐条记录。也可以直接调接口（需要管理员登录得到的 token，即 `/auth/login` 返回的 `token`）：
+
+```bash
+TOKEN=$(curl -s -X POST https://relay.example.com/auth/login -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"..."}' | jq -r .token)
+
+# 逐条记录，JSON，默认最多 1000 条
+curl -H "Authorization: Bearer $TOKEN" 'https://relay.example.com/admin/api/usage?actor=lane-m07-a&since=2026-11-10'
+# CSV：id,created_at,user,model,input_tokens,output_tokens,actor,task,run，默认最多 10 万条
+curl -H "Authorization: Bearer $TOKEN" 'https://relay.example.com/admin/api/usage/export?task=M07&since=2026-11-10T00:00:00Z' > usage.csv
+```
+
+参数都可选：`since`、`until`（UTC，`2026-11-10` 或 `2026-11-10T08:00:00Z` 这样的格式，写错返回 422）、`user`、`actor`、`task`、`run`、`limit`。`/admin/usage`（Usage 页的按天汇总）也接受 `actor`、`task`。
+
+### 留存请求体（可选）
+
+设了 `RELAY_CAPTURE_DIR` 后，每个成功的对话请求（`/v1/messages`、`/v1/chat/completions`、`/v1/responses`）都会存一份到 `<目录>/<UTC 日期>/<用量记录 id>.json.gz`，内容是：
+
+- 客户端发来的请求体，和上游返回的响应体；流式响应是拼起来的 SSE 原文，单个响应最多存 32 MB，超出部分截掉并标记 `response_truncated`。
+- 用户名、模型、服务商、状态码，以及 actor、task、run。
+
+不存任何请求头，所以文件里没有 relay key 和上游 key。客户端断开时也会存下已收到的部分。写盘失败只记日志，不影响请求本身。被上游拒绝、排队超时的请求不存。
+
+`RELAY_CAPTURE_SAMPLE` 设采样率（0–1，默认 1 即全部留存），例如 `0.1` 只存一成。留存的是对话原文，可能含代码和隐私信息，请控制目录权限并定期清理，例如 `find "$RELAY_CAPTURE_DIR" -mindepth 1 -maxdepth 1 -mtime +14 -exec rm -rf {} +`。
+
+读取：`gzip -dc 2026-11-10/1234.json.gz | jq .`
+
 ## 部署
 
 ### 懒猫微服
@@ -164,6 +248,9 @@ DATABASE_URL="sqlite:relay.db?mode=rwc" BIND_ADDR=127.0.0.1:3000 ./target/releas
 | `PUBLIC_BIND_ADDR` | 不设 | 公网专用端口，只提供 API，给隧道用 |
 | `CLOUDFLARED_PATH` | 不设 | cloudflared 程序路径；同时设了 `PUBLIC_BIND_ADDR` 才会启用 Public Access |
 | `LAZYCAT` | 不设 | 设为 `1` 时信任懒猫网关注入的身份头。**只能在懒猫网关后面设置**，否则任何人都能伪造身份 |
+| `RELAY_QUEUE_TIMEOUT_SECS` | `120` | 服务商并发已满时，请求最多排队多少秒，超时返回 429 |
+| `RELAY_CAPTURE_DIR` | 不设 | 留存请求体和响应体的目录；不设就不留存 |
+| `RELAY_CAPTURE_SAMPLE` | `1` | 留存采样率，0–1 |
 
 对外提供服务时请放在 HTTPS 反向代理后面。
 

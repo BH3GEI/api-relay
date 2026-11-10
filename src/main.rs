@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, Json, Path, State},
+    extract::{DefaultBodyLimit, Json, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware,
     response::{Html, Response},
@@ -15,9 +15,11 @@ mod auth;
 mod catalog;
 mod db;
 mod guard;
+mod limiter;
 mod pool;
 mod quota;
 mod relay;
+mod trace;
 mod tunnel;
 mod usage;
 
@@ -34,6 +36,12 @@ pub struct AppState {
     /// Running as a LazyCat app: trust the identity headers its gateway sets
     pub lazycat: bool,
     pub tunnel: tunnel::Tunnel,
+    /// Requests in flight per provider, under each provider's `max_concurrency`
+    pub limiter: limiter::Limiter,
+    /// How long a request waits for a provider slot before getting a 429
+    pub queue_timeout: std::time::Duration,
+    /// Request/response capture to disk, when `RELAY_CAPTURE_DIR` is set
+    pub capture: Option<trace::CaptureConfig>,
 }
 
 #[tokio::main]
@@ -72,7 +80,13 @@ async fn main() {
         admission: tokio::sync::Mutex::new(()),
         lazycat,
         tunnel: tunnel::Tunnel::new(std::env::var("CLOUDFLARED_PATH").ok(), public_bind_addr.as_deref()),
+        limiter: limiter::Limiter::default(),
+        queue_timeout: limiter::queue_timeout_from_env(),
+        capture: trace::CaptureConfig::from_env(),
     });
+    if let Some(c) = &state.capture {
+        println!("Capturing request and response bodies to {} (sample rate {})", c.dir.display(), c.sample);
+    }
     catalog::spawn_refresher(state.clone());
     tunnel::spawn(state.clone());
 
@@ -88,6 +102,8 @@ async fn main() {
         .route("/user/usage", get(user_usage))
         .route("/user/config", get(user_config))
         .route("/admin/usage", get(admin_usage))
+        .route("/admin/api/usage", get(admin_usage_rows))
+        .route("/admin/api/usage/export", get(admin_usage_export))
         .route("/admin/limits", get(admin_list_limits).post(admin_create_limit))
         .route("/admin/limits/:id", delete(admin_delete_limit))
         .route("/admin/users", get(admin_list_users).post(admin_create_user))
@@ -180,15 +196,32 @@ async fn admin_delete_user(State(state): State<Arc<AppState>>, headers: HeaderMa
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn admin_list_providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Vec<db::Provider>>, StatusCode> {
+#[derive(serde::Serialize)]
+struct ProviderWithLoad {
+    #[serde(flatten)]
+    provider: db::Provider,
+    /// Requests to this provider in flight right now
+    in_flight: usize,
+}
+
+async fn admin_list_providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Vec<ProviderWithLoad>>, StatusCode> {
     auth::require_admin(&state, &headers).await?;
-    db::list_providers(&state.db).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let providers = db::list_providers(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(providers.into_iter().map(|p| ProviderWithLoad { in_flight: state.limiter.in_flight(p.id), provider: p }).collect()))
 }
 
 #[derive(Deserialize)]
-struct ProviderReq { name: String, base_url: String, anthropic_base_url: Option<String>, user_agent: String, api_key: Option<String>, models: Option<String>, enabled: Option<bool> }
+struct ProviderReq { name: String, base_url: String, anthropic_base_url: Option<String>, user_agent: String, api_key: Option<String>, models: Option<String>, enabled: Option<bool>, max_concurrency: Option<i64> }
 
 impl ProviderReq {
+    /// A cap must allow at least one request; leave it empty for no cap.
+    fn check(&self) -> Result<(), StatusCode> {
+        match self.max_concurrency {
+            Some(n) if n < 1 => Err(StatusCode::UNPROCESSABLE_ENTITY),
+            _ => Ok(()),
+        }
+    }
+
     fn input(&self) -> db::ProviderInput<'_> {
         db::ProviderInput {
             name: &self.name,
@@ -198,12 +231,14 @@ impl ProviderReq {
             api_key: self.api_key.as_deref(),
             models: self.models.as_deref().unwrap_or(""),
             enabled: self.enabled.unwrap_or(true),
+            max_concurrency: self.max_concurrency,
         }
     }
 }
 
 async fn admin_create_provider(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(req): Json<ProviderReq>) -> Result<Json<db::Provider>, StatusCode> {
     auth::require_admin(&state, &headers).await?;
+    req.check()?;
     let provider = db::create_provider(&state.db, &req.input()).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     catalog::refresh_in_background(&state);
     Ok(Json(provider))
@@ -211,6 +246,7 @@ async fn admin_create_provider(State(state): State<Arc<AppState>>, headers: Head
 
 async fn admin_update_provider(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(id): Path<i64>, Json(req): Json<ProviderReq>) -> Result<Json<db::Provider>, StatusCode> {
     auth::require_admin(&state, &headers).await?;
+    req.check()?;
     let provider = db::update_provider(&state.db, id, &req.input()).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     catalog::refresh_in_background(&state);
     Ok(Json(provider))
@@ -280,9 +316,89 @@ async fn user_usage(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
     db::get_user_usage_today(&state.db, user.id).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-async fn admin_usage(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Vec<db::AdminUsageStats>>, StatusCode> {
+#[derive(Deserialize, Default)]
+struct UsageQuery {
+    since: Option<String>,
+    until: Option<String>,
+    user: Option<String>,
+    actor: Option<String>,
+    task: Option<String>,
+    run: Option<String>,
+    limit: Option<i64>,
+}
+
+/// Empty query parameters mean "no filter"
+fn param(v: &Option<String>) -> Option<&str> {
+    v.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+async fn admin_usage(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<UsageQuery>) -> Result<Json<Vec<db::AdminUsageStats>>, StatusCode> {
     auth::require_admin(&state, &headers).await?;
-    db::get_all_usage_today(&state.db).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    db::get_all_usage_today(&state.db, param(&q.actor), param(&q.task)).await.map(Json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Individual requests, filtered by time range, user, actor, task and run.
+async fn usage_rows(state: &AppState, q: &UsageQuery, default_limit: i64) -> Result<Vec<db::UsageRow>, StatusCode> {
+    for t in [param(&q.since), param(&q.until)].into_iter().flatten() {
+        if !db::valid_datetime(&state.db, t).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+    let filter = db::UsageFilter {
+        since: param(&q.since),
+        until: param(&q.until),
+        username: param(&q.user),
+        actor: param(&q.actor),
+        task: param(&q.task),
+        run: param(&q.run),
+        limit: q.limit.unwrap_or(default_limit).clamp(1, 1_000_000),
+    };
+    db::list_usage(&state.db, &filter).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// `GET /admin/api/usage?since=&until=&user=&actor=&task=&run=&limit=` as JSON (default 1000 rows).
+async fn admin_usage_rows(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<UsageQuery>) -> Result<Json<Vec<db::UsageRow>>, StatusCode> {
+    auth::require_admin(&state, &headers).await?;
+    usage_rows(&state, &q, 1000).await.map(Json)
+}
+
+/// The same as CSV, for analysis outside the relay (default 100000 rows).
+async fn admin_usage_export(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<UsageQuery>) -> Result<Response, StatusCode> {
+    auth::require_admin(&state, &headers).await?;
+    let rows = usage_rows(&state, &q, 100_000).await?;
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(header::CONTENT_DISPOSITION, "attachment; filename=\"usage.csv\"")
+        .body(axum::body::Body::from(usage_csv(&rows)))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn usage_csv(rows: &[db::UsageRow]) -> String {
+    fn field(out: &mut String, v: &str) {
+        if v.contains([',', '"', '\n', '\r']) {
+            out.push('"');
+            out.push_str(&v.replace('"', "\"\""));
+            out.push('"');
+        } else {
+            out.push_str(v);
+        }
+    }
+    let mut out = String::from("id,created_at,user,model,input_tokens,output_tokens,actor,task,run\n");
+    for r in rows {
+        let cols = [
+            r.id.to_string(), r.created_at.clone(), r.username.clone(), r.model.clone(),
+            r.input_tokens.to_string(), r.output_tokens.to_string(),
+            r.actor.clone().unwrap_or_default(), r.task.clone().unwrap_or_default(), r.run.clone().unwrap_or_default(),
+        ];
+        for (i, c) in cols.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            field(&mut out, c);
+        }
+        out.push('\n');
+    }
+    out
 }
 
 #[derive(serde::Serialize)]
@@ -372,4 +488,22 @@ async fn admin_set_public_url(State(state): State<Arc<AppState>>, headers: Heade
     }
     db::set_setting(&state.db, PUBLIC_URL_SETTING, url).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csv_quotes_only_when_needed() {
+        let row = |actor: Option<&str>, task: Option<&str>| db::UsageRow {
+            id: 7, created_at: "2026-11-10 08:00:00".into(), username: "lane-m07-a".into(), model: "kimi/k3".into(),
+            input_tokens: 100, output_tokens: 5, actor: actor.map(Into::into), task: task.map(Into::into), run: None,
+        };
+        let csv = usage_csv(&[row(Some("lane-m07-a"), Some("修复, \"登录\"")), row(None, None)]);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[0], "id,created_at,user,model,input_tokens,output_tokens,actor,task,run");
+        assert_eq!(lines[1], "7,2026-11-10 08:00:00,lane-m07-a,kimi/k3,100,5,lane-m07-a,\"修复, \"\"登录\"\"\",");
+        assert_eq!(lines[2], "7,2026-11-10 08:00:00,lane-m07-a,kimi/k3,100,5,,,");
+    }
 }
