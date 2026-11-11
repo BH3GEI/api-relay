@@ -107,6 +107,16 @@ impl Endpoint {
         matches!(self, Endpoint::Messages | Endpoint::CountTokens)
     }
 
+    /// The relay path, as recorded in captures.
+    fn path(self) -> &'static str {
+        match self {
+            Endpoint::ChatCompletions => "/v1/chat/completions",
+            Endpoint::Responses => "/v1/responses",
+            Endpoint::Messages => "/v1/messages",
+            Endpoint::CountTokens => "/v1/messages/count_tokens",
+        }
+    }
+
     fn url(self, provider: &db::Provider) -> String {
         match self {
             Endpoint::ChatCompletions => format!("{}/chat/completions", provider.base_url.trim_end_matches('/')),
@@ -135,8 +145,8 @@ async fn provider_keys(state: &AppState, provider_id: i64) -> Vec<String> {
 
 /// Check the caller's limits for `model` and, when `counts`, record the request before it is
 /// forwarded. Both happen under one lock, so parallel requests can't all slip past a limit.
-/// Returns the user id and the usage row to fill in.
-async fn admit(state: &AppState, headers: &HeaderMap, model: &str, counts: bool) -> Result<(i64, Option<i64>), Response> {
+/// Returns the user and the usage row to fill in.
+async fn admit(state: &AppState, headers: &HeaderMap, model: &str, counts: bool) -> Result<(db::User, Option<i64>), Response> {
     let api_key = extract_api_key(headers).ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
     let user = db::find_user_by_api_key(&state.db, &api_key).await.map_err(|_| StatusCode::UNAUTHORIZED.into_response())?;
     let _admission = state.admission.lock().await;
@@ -144,12 +154,34 @@ async fn admit(state: &AppState, headers: &HeaderMap, model: &str, counts: bool)
     if !db::check_limit(&state.db, user.id, model).await.unwrap_or(false) {
         return Err(error_response(StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", &format!("Usage limit reached for {model}")));
     }
+    let trace = crate::trace::Trace::from_headers(headers);
     let usage = match counts {
-        true => Some(db::start_usage(&state.db, user.id, model).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?),
+        true => Some(db::start_usage(&state.db, user.id, model, &trace).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?),
         false => None,
     };
-    Ok((user.id, usage))
+    Ok((user, usage))
 }
+
+/// Wait for a free slot under the provider's concurrency cap. A request that waits too long
+/// gets a 429 with Retry-After and, like any refused request, doesn't count against the user.
+async fn take_slot(state: &AppState, provider: &db::Provider, usage_id: Option<i64>) -> Result<crate::limiter::Permit, Response> {
+    match state.limiter.acquire(provider.id, provider.max_concurrency, state.queue_timeout).await {
+        Ok(permit) => Ok(permit),
+        Err(_) => {
+            if let Some(id) = usage_id {
+                let _ = db::drop_usage(&state.db, id).await;
+            }
+            eprintln!("provider {}: no free slot within {}s (cap {:?})", provider.name, state.queue_timeout.as_secs(), provider.max_concurrency);
+            let mut resp = error_response(StatusCode::TOO_MANY_REQUESTS, "rate_limit_error",
+                &format!("Provider {} is at its concurrency limit, try again later", provider.name));
+            resp.headers_mut().insert(header::RETRY_AFTER, axum::http::HeaderValue::from_static(QUEUE_RETRY_AFTER));
+            Err(resp)
+        }
+    }
+}
+
+/// Seconds a client is told to wait after its request timed out in the queue
+const QUEUE_RETRY_AFTER: &str = "10";
 
 /// An error body both OpenAI and Anthropic clients understand.
 fn error_response(status: StatusCode, kind: &str, message: &str) -> Response {
@@ -182,6 +214,22 @@ impl Drop for UsageRecorder {
     }
 }
 
+/// What rides along with a response body and is dropped with it, when the body has been sent
+/// or the client hung up: the usage recorder, the body capture and the provider slot.
+#[derive(Default)]
+struct BodyTail {
+    recorder: Option<UsageRecorder>,
+    capture: Option<crate::trace::Capture>,
+    /// Held only to be dropped: that frees the provider slot
+    _permit: Option<crate::limiter::Permit>,
+}
+
+impl BodyTail {
+    fn permit(permit: crate::limiter::Permit) -> BodyTail {
+        BodyTail { _permit: Some(permit), ..Default::default() }
+    }
+}
+
 async fn relay(
     state: &AppState,
     headers: &HeaderMap,
@@ -198,8 +246,12 @@ async fn relay(
     // Limits and usage use the catalog id, so `ark-code-latest` and `ark/ark-code-latest` count as one model
     let model_name = entry.id;
     // Token counting isn't usage
-    let (_, usage_id) = admit(state, headers, &model_name, !matches!(endpoint, Endpoint::CountTokens)).await?;
-    body_json["model"] = Value::String(entry.upstream_model);
+    let (user, usage_id) = admit(state, headers, &model_name, !matches!(endpoint, Endpoint::CountTokens)).await?;
+    // Only requests with a usage row are captured: the file is named after it
+    let captured = state.capture.as_ref().filter(|c| usage_id.is_some() && c.sampled());
+    let client_body = captured.map(|_| body_json.clone());
+    let upstream_model = entry.upstream_model;
+    body_json["model"] = Value::String(upstream_model.clone());
 
     let is_stream = body_json.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
     if is_stream && matches!(endpoint, Endpoint::ChatCompletions) && body_json.get("stream_options").is_none() {
@@ -210,6 +262,8 @@ async fn relay(
     let body_str = body_json.to_string();
 
     let keys = provider_keys(state, provider.id).await;
+    // Held until the response is over, on every path
+    let permit = take_slot(state, &provider, usage_id).await?;
 
     // Anthropic clients pick the API version and opt into beta features per request
     let anthropic_version = headers.get("anthropic-version").and_then(|v| v.to_str().ok()).unwrap_or("2023-06-01");
@@ -241,25 +295,45 @@ async fn relay(
                 let _ = db::drop_usage(&state.db, id).await;
             }
             return match other {
-                Ok(resp) => stream_response(resp, None).map_err(IntoResponse::into_response),
+                Ok(resp) => stream_response(resp, BodyTail::permit(permit)).map_err(IntoResponse::into_response),
                 Err(e) => Err(exhausted_response(e)),
             };
         }
     };
 
     let Some(usage_id) = usage_id else {
-        return stream_response(resp, None).map_err(IntoResponse::into_response);
+        return stream_response(resp, BodyTail::permit(permit)).map_err(IntoResponse::into_response);
     };
+    let capture = captured.zip(client_body).map(|(cfg, request)| {
+        let mut meta = serde_json::Map::new();
+        meta.insert("created_at".into(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()).into());
+        meta.insert("endpoint".into(), endpoint.path().into());
+        meta.insert("user".into(), user.username.clone().into());
+        meta.insert("model".into(), model_name.clone().into());
+        meta.insert("provider".into(), provider.name.clone().into());
+        meta.insert("upstream_model".into(), upstream_model.clone().into());
+        meta.insert("status".into(), resp.status().as_u16().into());
+        let trace = crate::trace::Trace::from_headers(headers);
+        for (k, v) in [("actor", trace.actor), ("task", trace.task), ("run", trace.run)] {
+            meta.insert(k.into(), v.map_or(Value::Null, Value::String));
+        }
+        crate::trace::Capture::new(cfg, usage_id, meta, request, is_stream)
+    });
     if is_stream {
         let recorder = UsageRecorder { db: state.db.clone(), id: usage_id, scanner: Default::default() };
-        return stream_response(resp, Some(recorder)).map_err(IntoResponse::into_response);
+        let tail = BodyTail { recorder: Some(recorder), capture, _permit: Some(permit) };
+        return stream_response(resp, tail).map_err(IntoResponse::into_response);
     }
 
     // Non-streaming: read body, extract tokens, then return
     let status_code = resp.status();
     let resp_bytes = resp.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY.into_response())?;
+    drop(permit);
     let (input_t, output_t) = crate::usage::from_body(&resp_bytes);
     let _ = db::finish_usage(&state.db, usage_id, input_t, output_t).await;
+    if let Some(mut capture) = capture {
+        capture.feed(&resp_bytes);
+    }
     Response::builder()
         .status(status_code)
         .header(header::CONTENT_TYPE, "application/json")
@@ -343,6 +417,7 @@ async fn relay_generic(
 
     let body_str = body_json.to_string();
     let keys = provider_keys(state, provider.id).await;
+    let permit = take_slot(state, &provider, usage_id).await?;
 
     let sent = state.keys.send(keys, |key| {
         let req = state.http_client
@@ -363,18 +438,26 @@ async fn relay_generic(
         let _ = db::drop_usage(&state.db, id).await;
     }
     match sent {
-        Ok(resp) => stream_response(resp, None).map_err(IntoResponse::into_response),
+        Ok(resp) => stream_response(resp, BodyTail::permit(permit)).map_err(IntoResponse::into_response),
         Err(e) => Err(exhausted_response(e)),
     }
 }
 
-fn stream_response(resp: reqwest::Response, mut recorder: Option<UsageRecorder>) -> Result<Response, StatusCode> {
+fn stream_response(resp: reqwest::Response, mut tail: BodyTail) -> Result<Response, StatusCode> {
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let content_type = resp.headers().get("content-type").cloned();
 
+    // `tail` lives in this closure, so it is dropped with the body: at its end or on hang-up
     let stream = resp.bytes_stream().map(move |chunk| {
-        if let (Ok(bytes), Some(r)) = (&chunk, recorder.as_mut()) {
-            r.scanner.feed(bytes);
+        // Use `tail` as a whole, so the closure owns all of it (closures capture disjoint fields)
+        let tail = &mut tail;
+        if let Ok(bytes) = &chunk {
+            if let Some(r) = tail.recorder.as_mut() {
+                r.scanner.feed(bytes);
+            }
+            if let Some(c) = tail.capture.as_mut() {
+                c.feed(bytes);
+            }
         }
         chunk.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     });
@@ -424,7 +507,7 @@ async fn file_proxy(
     }).await;
 
     match sent {
-        Ok(resp) => stream_response(resp, None).map_err(IntoResponse::into_response),
+        Ok(resp) => stream_response(resp, BodyTail::default()).map_err(IntoResponse::into_response),
         Err(e) => Err(exhausted_response(e)),
     }
 }
@@ -476,4 +559,47 @@ pub async fn files_delete(
 ) -> Result<Response, Response> {
     check_file_id(&file_id).map_err(IntoResponse::into_response)?;
     file_proxy(&state, &headers, &format!("/v1/files/{file_id}"), "DELETE", Bytes::new()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limiter::Limiter;
+    use std::time::Duration;
+
+    fn upstream(chunks: Vec<&'static str>, then_hang: bool) -> reqwest::Response {
+        let head = futures::stream::iter(chunks.into_iter().map(|c| Ok::<_, std::io::Error>(Bytes::from(c))));
+        let body = match then_hang {
+            false => reqwest::Body::wrap_stream(head),
+            true => reqwest::Body::wrap_stream(head.chain(futures::stream::pending())),
+        };
+        let resp = axum::http::Response::builder().header("content-type", "text/event-stream").body(body).unwrap();
+        reqwest::Response::from(resp)
+    }
+
+    #[tokio::test]
+    async fn slot_held_until_stream_ends() {
+        let limiter = Limiter::default();
+        let permit = limiter.acquire(1, Some(1), Duration::from_secs(1)).await.unwrap();
+        let resp = stream_response(upstream(vec!["data: 1\n\n", "data: [DONE]\n\n"], false), BodyTail::permit(permit)).unwrap();
+        // The handler has returned, but the body hasn't been sent yet
+        assert_eq!(limiter.in_flight(1), 1);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], b"data: 1\n\ndata: [DONE]\n\n");
+        assert_eq!(limiter.in_flight(1), 0);
+    }
+
+    #[tokio::test]
+    async fn slot_freed_when_client_hangs_up() {
+        let limiter = Limiter::default();
+        let permit = limiter.acquire(1, Some(1), Duration::from_secs(1)).await.unwrap();
+        let resp = stream_response(upstream(vec!["data: 1\n\n"], true), BodyTail::permit(permit)).unwrap();
+        let mut body = resp.into_body().into_data_stream();
+        assert_eq!(&body.next().await.unwrap().unwrap()[..], b"data: 1\n\n");
+        assert_eq!(limiter.in_flight(1), 1);
+        // The client goes away with the upstream still streaming
+        drop(body);
+        assert_eq!(limiter.in_flight(1), 0);
+        assert!(limiter.acquire(1, Some(1), Duration::from_millis(50)).await.is_ok());
+    }
 }

@@ -26,6 +26,8 @@ pub struct Provider {
     pub anthropic_base_url: String,
     /// Model ids to offer in addition to what the upstream lists (some upstreams have no /models)
     pub models: String,
+    /// Most requests in flight to this provider at once; None means no cap
+    pub max_concurrency: Option<i64>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -76,6 +78,9 @@ pub async fn migrate(pool: &SqlitePool) {
         .execute(pool).await;
     let _ = sqlx::query("ALTER TABLE providers ADD COLUMN models TEXT NOT NULL DEFAULT ''")
         .execute(pool).await;
+    // Migration: per-provider concurrency cap, NULL = no cap
+    let _ = sqlx::query("ALTER TABLE providers ADD COLUMN max_concurrency INTEGER")
+        .execute(pool).await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS provider_keys (
@@ -99,6 +104,15 @@ pub async fn migrate(pool: &SqlitePool) {
         )"
     ).execute(pool).await.unwrap();
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_usage_user_date ON usage_logs(user_id, created_at)")
+        .execute(pool).await;
+    // Migration: who sent a request and for what, from the client's X-Octo-* headers
+    for col in ["actor", "task", "run"] {
+        let _ = sqlx::query(&format!("ALTER TABLE usage_logs ADD COLUMN {col} TEXT"))
+            .execute(pool).await;
+    }
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_usage_actor_date ON usage_logs(actor, created_at)")
+        .execute(pool).await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_usage_task_date ON usage_logs(task, created_at)")
         .execute(pool).await;
 
     sqlx::query(
@@ -227,18 +241,19 @@ pub struct ProviderInput<'a> {
     pub api_key: Option<&'a str>,
     pub models: &'a str,
     pub enabled: bool,
+    pub max_concurrency: Option<i64>,
 }
 
 pub async fn create_provider(pool: &SqlitePool, p: &ProviderInput<'_>) -> Result<Provider, sqlx::Error> {
     sqlx::query_as(
-        "INSERT INTO providers (name, base_url, anthropic_base_url, user_agent, api_key, models, enabled) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *"
-    ).bind(p.name).bind(p.base_url).bind(p.anthropic_base_url).bind(p.user_agent).bind(p.api_key).bind(p.models).bind(p.enabled).fetch_one(pool).await
+        "INSERT INTO providers (name, base_url, anthropic_base_url, user_agent, api_key, models, enabled, max_concurrency) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *"
+    ).bind(p.name).bind(p.base_url).bind(p.anthropic_base_url).bind(p.user_agent).bind(p.api_key).bind(p.models).bind(p.enabled).bind(p.max_concurrency).fetch_one(pool).await
 }
 
 pub async fn update_provider(pool: &SqlitePool, id: i64, p: &ProviderInput<'_>) -> Result<Provider, sqlx::Error> {
     sqlx::query_as(
-        "UPDATE providers SET name=?, base_url=?, anthropic_base_url=?, user_agent=?, api_key=?, models=?, enabled=? WHERE id=? RETURNING *"
-    ).bind(p.name).bind(p.base_url).bind(p.anthropic_base_url).bind(p.user_agent).bind(p.api_key).bind(p.models).bind(p.enabled).bind(id).fetch_one(pool).await
+        "UPDATE providers SET name=?, base_url=?, anthropic_base_url=?, user_agent=?, api_key=?, models=?, enabled=?, max_concurrency=? WHERE id=? RETURNING *"
+    ).bind(p.name).bind(p.base_url).bind(p.anthropic_base_url).bind(p.user_agent).bind(p.api_key).bind(p.models).bind(p.enabled).bind(p.max_concurrency).bind(id).fetch_one(pool).await
 }
 
 pub async fn get_provider(pool: &SqlitePool, id: i64) -> Result<Provider, sqlx::Error> {
@@ -285,9 +300,9 @@ pub async fn delete_provider_key(pool: &SqlitePool, id: i64) -> Result<(), sqlx:
 // ── Usage Logging ──
 
 /// Record a request as it starts, so concurrent requests count against limits; tokens are filled in later.
-pub async fn start_usage(pool: &SqlitePool, user_id: i64, model: &str) -> Result<i64, sqlx::Error> {
-    let (id,): (i64,) = sqlx::query_as("INSERT INTO usage_logs (user_id, model) VALUES (?, ?) RETURNING id")
-        .bind(user_id).bind(model).fetch_one(pool).await?;
+pub async fn start_usage(pool: &SqlitePool, user_id: i64, model: &str, trace: &crate::trace::Trace) -> Result<i64, sqlx::Error> {
+    let (id,): (i64,) = sqlx::query_as("INSERT INTO usage_logs (user_id, model, actor, task, run) VALUES (?, ?, ?, ?, ?) RETURNING id")
+        .bind(user_id).bind(model).bind(&trace.actor).bind(&trace.task).bind(&trace.run).fetch_one(pool).await?;
     Ok(id)
 }
 
@@ -370,13 +385,60 @@ pub struct AdminUsageStats {
     pub total_tokens: i64,
 }
 
-pub async fn get_all_usage_today(pool: &SqlitePool) -> Result<Vec<AdminUsageStats>, sqlx::Error> {
+/// Today's usage per user and model; `actor` / `task` narrow it to requests carrying that label.
+pub async fn get_all_usage_today(pool: &SqlitePool, actor: Option<&str>, task: Option<&str>) -> Result<Vec<AdminUsageStats>, sqlx::Error> {
     sqlx::query_as(
         "SELECT u.id as user_id, u.username, l.model, COUNT(*) as requests, COALESCE(SUM(l.input_tokens + l.output_tokens), 0) as total_tokens
          FROM usage_logs l JOIN users u ON l.user_id = u.id
-         WHERE date(l.created_at) = date('now')
+         WHERE date(l.created_at) = date('now') AND (? IS NULL OR l.actor = ?) AND (? IS NULL OR l.task = ?)
          GROUP BY u.id, l.model ORDER BY requests DESC"
-    ).fetch_all(pool).await
+    ).bind(actor).bind(actor).bind(task).bind(task).fetch_all(pool).await
+}
+
+/// One request in the usage log, for export.
+#[derive(Serialize, sqlx::FromRow, Debug)]
+pub struct UsageRow {
+    pub id: i64,
+    pub created_at: String,
+    pub username: String,
+    pub model: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub actor: Option<String>,
+    pub task: Option<String>,
+    pub run: Option<String>,
+}
+
+#[derive(Default)]
+pub struct UsageFilter<'a> {
+    /// Anything SQLite's datetime() understands (`2026-11-10`, `2026-11-10T08:00:00Z`, …), UTC
+    pub since: Option<&'a str>,
+    pub until: Option<&'a str>,
+    pub username: Option<&'a str>,
+    pub actor: Option<&'a str>,
+    pub task: Option<&'a str>,
+    pub run: Option<&'a str>,
+    pub limit: i64,
+}
+
+/// Whether SQLite can read `s` as a date and time.
+pub async fn valid_datetime(pool: &SqlitePool, s: &str) -> Result<bool, sqlx::Error> {
+    let (v,): (Option<String>,) = sqlx::query_as("SELECT datetime(?)").bind(s).fetch_one(pool).await?;
+    Ok(v.is_some())
+}
+
+/// Individual requests matching `f`, oldest first.
+pub async fn list_usage(pool: &SqlitePool, f: &UsageFilter<'_>) -> Result<Vec<UsageRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT l.id, CAST(l.created_at AS TEXT) as created_at, COALESCE(u.username, '') as username, l.model,
+                COALESCE(l.input_tokens, 0) as input_tokens, COALESCE(l.output_tokens, 0) as output_tokens, l.actor, l.task, l.run
+         FROM usage_logs l LEFT JOIN users u ON l.user_id = u.id
+         WHERE (?1 IS NULL OR l.created_at >= datetime(?1)) AND (?2 IS NULL OR l.created_at < datetime(?2))
+           AND (?3 IS NULL OR u.username = ?3) AND (?4 IS NULL OR l.actor = ?4)
+           AND (?5 IS NULL OR l.task = ?5) AND (?6 IS NULL OR l.run = ?6)
+         ORDER BY l.id LIMIT ?7"
+    ).bind(f.since).bind(f.until).bind(f.username).bind(f.actor).bind(f.task).bind(f.run).bind(f.limit)
+        .fetch_all(pool).await
 }
 
 // ── Usage Limits CRUD ──
@@ -396,4 +458,53 @@ pub async fn create_limit(pool: &SqlitePool, user_id: i64, model: &str, window_s
 pub async fn delete_limit(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM usage_limits WHERE id = ?").bind(id).execute(pool).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trace::Trace;
+
+    async fn memory_db() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        migrate(&pool).await;
+        // Running it again on a migrated database is harmless
+        migrate(&pool).await;
+        pool
+    }
+
+    #[tokio::test]
+    async fn provider_concurrency_round_trips() {
+        let pool = memory_db().await;
+        let mut input = ProviderInput { name: "kimi", base_url: "https://example.invalid/v1", anthropic_base_url: "", user_agent: "ua", api_key: None, models: "", enabled: true, max_concurrency: None };
+        let p = create_provider(&pool, &input).await.unwrap();
+        assert_eq!(p.max_concurrency, None);
+        input.max_concurrency = Some(8);
+        assert_eq!(update_provider(&pool, p.id, &input).await.unwrap().max_concurrency, Some(8));
+    }
+
+    #[tokio::test]
+    async fn usage_carries_trace_and_filters() {
+        let pool = memory_db().await;
+        let user = insert_user(&pool, "lane-m07-a", "", "x", "k1", false).await.unwrap();
+        let t1 = Trace { actor: Some("lane-m07-a".into()), task: Some("M07".into()), run: Some("r1".into()) };
+        let a = start_usage(&pool, user.id, "kimi/k3", &t1).await.unwrap();
+        finish_usage(&pool, a, 10, 2).await.unwrap();
+        start_usage(&pool, user.id, "kimi/k3", &Trace::default()).await.unwrap();
+
+        let all = list_usage(&pool, &UsageFilter { limit: 100, ..Default::default() }).await.unwrap();
+        assert_eq!(all.len(), 2);
+        let by_task = list_usage(&pool, &UsageFilter { task: Some("M07"), limit: 100, ..Default::default() }).await.unwrap();
+        assert_eq!(by_task.len(), 1);
+        assert_eq!((by_task[0].actor.as_deref(), by_task[0].run.as_deref(), by_task[0].input_tokens), (Some("lane-m07-a"), Some("r1"), 10));
+        assert_eq!(by_task[0].username, "lane-m07-a");
+        let future = list_usage(&pool, &UsageFilter { since: Some("2999-01-01"), limit: 100, ..Default::default() }).await.unwrap();
+        assert!(future.is_empty());
+        assert!(valid_datetime(&pool, "2026-11-10T08:00:00Z").await.unwrap());
+        assert!(!valid_datetime(&pool, "yesterday").await.unwrap());
+
+        let today = get_all_usage_today(&pool, Some("lane-m07-a"), None).await.unwrap();
+        assert_eq!(today[0].requests, 1);
+        assert_eq!(get_all_usage_today(&pool, None, None).await.unwrap()[0].requests, 2);
+    }
 }

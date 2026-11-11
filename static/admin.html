@@ -83,9 +83,10 @@ td.actions { white-space: nowrap; text-align: right; }
       <input id="p-aurl" placeholder="Anthropic Base URL (optional)" style="width:200px">
       <input id="p-ua" placeholder="User-Agent" style="width:160px">
       <input id="p-models" placeholder="Extra models, comma-separated (optional)" style="width:240px">
+      <input id="p-maxc" placeholder="Max concurrency" type="number" min="1" style="width:120px">
       <button onclick="createProvider()">Add</button>
     </div>
-    <table><thead><tr><th>Name</th><th>Keys</th><th>Endpoints</th><th>Extra Models</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>
+    <table><thead><tr><th>Name</th><th>Keys</th><th>Endpoints</th><th>Extra Models</th><th>In flight / Max</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>
 
     <div id="keys-section" class="hidden" style="margin-top:16px;padding-top:16px;border-top:1px solid #333">
       <h2 id="keys-title">Keys</h2>
@@ -111,6 +112,12 @@ td.actions { white-space: nowrap; text-align: right; }
   <!-- Usage -->
   <div id="tab-usage" class="card hidden">
     <h2>Today's Usage</h2>
+    <div style="margin-bottom:12px">
+      <input id="u-actor" placeholder="Actor" style="width:140px">
+      <input id="u-task" placeholder="Task" style="width:140px">
+      <button onclick="loadUsage()">Filter</button>
+      <button class="secondary" onclick="exportUsage()">Export CSV (last 7 days)</button>
+    </div>
     <table><thead><tr><th>User</th><th>Model</th><th>Requests</th><th>Tokens</th></tr></thead><tbody id="usage-body"></tbody></table>
   </div>
 
@@ -275,6 +282,7 @@ async function loadProviders() {
       <div><span class="url-label">Anthropic</span><span class="url">${esc(p.anthropic_base_url || '(derived)')}</span></div>
     </td>
     <td>${esc(p.models || '-')}</td>
+    <td style="white-space:nowrap">${p.in_flight} / ${p.max_concurrency ?? '∞'} <button class="btn-sm secondary" onclick="setConcurrency(${p.id})">Edit</button></td>
     <td class="actions">
       <button class="btn-sm secondary" onclick="showKeys(${p.id})">Manage Keys</button>
       <button class="btn-danger btn-sm" onclick="deleteProvider(${p.id})">Delete</button>
@@ -288,8 +296,19 @@ async function createProvider() {
     anthropic_base_url: document.getElementById('p-aurl').value,
     user_agent: document.getElementById('p-ua').value,
     models: document.getElementById('p-models').value,
+    max_concurrency: parseInt(document.getElementById('p-maxc').value) || null,
     enabled: true
   })});
+  loadProviders();
+}
+// Requests beyond the cap wait for a slot; empty means no cap
+async function setConcurrency(id) {
+  const p = providers.find(p => p.id === id);
+  const v = prompt('Max concurrent requests to ' + p.name + ' (empty = no limit)', p.max_concurrency ?? '');
+  if (v === null) return;
+  const { in_flight, ...body } = p;
+  body.max_concurrency = parseInt(v) || null;
+  await api('/admin/providers/'+id, { method:'PUT', body: JSON.stringify(body) });
   loadProviders();
 }
 async function deleteProvider(id) {
@@ -307,11 +326,26 @@ async function loadModels() { renderModels(await api('/admin/catalog')); }
 async function refreshModels() { renderModels(await api('/admin/catalog/refresh', { method:'POST' })); }
 
 // Usage
+function usageFilter() {
+  return new URLSearchParams({ actor: document.getElementById('u-actor').value, task: document.getElementById('u-task').value });
+}
 async function loadUsage() {
-  const usage = await api('/admin/usage');
+  const usage = await api('/admin/usage?' + usageFilter());
   document.getElementById('usage-body').innerHTML = usage.map(u =>
     `<tr><td>${esc(u.username)}</td><td>${esc(u.model)}</td><td>${u.requests}</td><td>${u.total_tokens.toLocaleString()}</td></tr>`
   ).join('') || '<tr><td colspan="4" style="color:#666">No usage today</td></tr>';
+}
+// A plain link can't carry the token, so fetch and hand the browser a blob
+async function exportUsage() {
+  const q = usageFilter();
+  q.set('since', new Date(Date.now() - 7 * 86400e3).toISOString().slice(0, 19));
+  const r = await fetch(BASE + '/admin/api/usage/export?' + q, { headers: { 'Authorization': 'Bearer ' + token } });
+  if (!r.ok) return alert(await r.text() || r.statusText);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(await r.blob());
+  a.download = 'usage.csv';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
 // Limits
