@@ -79,6 +79,17 @@
     <p style="color:#888;font-size:13px">Synced from each provider every 10 minutes, and right after providers or keys change. Clients use these ids as-is; a bare upstream id works too when only one provider has it.</p>
     <div style="margin-bottom:12px"><button onclick="refreshModels()">Refresh now</button></div>
     <table><thead><tr><th>Model</th></tr></thead><tbody id="models-body"></tbody></table>
+
+    <h2 style="margin-top:28px">Model Groups</h2>
+    <p style="color:#888;font-size:13px">A group is a model name clients can pick (it is listed in /v1/models), standing for models tried in order. When a model's keys are all unavailable, or it answers 404, 408 or 5xx, the next model is tried; once an answer has started, it is not switched. Members not in the model list right now are skipped. A suffix like <code>[1m]</code> on the requested name is ignored when matching.</p>
+    <div style="margin-bottom:12px">
+      <input id="g-name" placeholder="Group name, e.g. auto" style="width:140px">
+      <input id="g-models" placeholder="Models in order, comma-separated, e.g. kimi/k3.1-pro, ark/ark-code-latest" style="width:420px">
+      <button id="g-save" onclick="saveGroup()">Add Group</button>
+      <button id="g-cancel" class="secondary hidden" onclick="resetGroupForm()">Cancel</button>
+      <span id="g-msg" style="font-size:13px;color:#f87171"></span>
+    </div>
+    <table><thead><tr><th>Name</th><th>Models, in order</th><th></th></tr></thead><tbody id="groups-body"></tbody></table>
   </div>
 
   <!-- Usage -->

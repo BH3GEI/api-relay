@@ -1,5 +1,6 @@
 //! Storage: SQLite, one module per kind of record.
 
+pub mod groups;
 pub mod limits;
 pub mod providers;
 mod schema;

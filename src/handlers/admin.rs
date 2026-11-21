@@ -159,6 +159,61 @@ pub async fn usage(State(state): St, _: Admin, Query(q): Query<UsageQuery>) -> R
     Ok(Json(Usage { report, rows }))
 }
 
+// ── Model groups ──
+
+#[derive(Serialize)]
+pub struct GroupView {
+    #[serde(flatten)]
+    group: db::groups::Group,
+    /// Members not in the catalog right now; requests skip them until they are
+    unknown: Vec<String>,
+}
+
+fn group_view(state: &AppState, group: db::groups::Group) -> GroupView {
+    let unknown = group.members().into_iter().filter(|m| !state.catalog.has(m)).collect();
+    GroupView { group, unknown }
+}
+
+pub async fn groups(State(state): St, _: Admin) -> Result<Json<Vec<GroupView>>> {
+    Ok(Json(db::groups::list(&state.db).await?.into_iter().map(|g| group_view(&state, g)).collect()))
+}
+
+/// A group's name and its members, checked: names follow the model id rules, a group doesn't
+/// take a catalog id's name, and members aren't groups.
+async fn checked_group(state: &AppState, req: &db::groups::GroupInput, id: Option<i64>) -> Result<(String, Vec<String>)> {
+    let name = req.name.trim().to_string();
+    let models = req.models.items();
+    let groups = db::groups::list(&state.db).await?;
+    let valid = catalog::valid_model_id(&name)
+        && !state.catalog.has(&name)
+        && !models.is_empty()
+        && models.iter().all(|m| catalog::valid_model_id(m) && !groups.iter().any(|g| g.name == *m));
+    if !valid {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY.into());
+    }
+    if groups.iter().any(|g| g.name == name && Some(g.id) != id) {
+        return Err(StatusCode::CONFLICT.into());
+    }
+    Ok((name, models))
+}
+
+pub async fn create_group(State(state): St, _: Admin, Json(req): Json<db::groups::GroupInput>) -> Result<Json<GroupView>> {
+    let (name, models) = checked_group(&state, &req, None).await?;
+    let group = db::groups::create(&state.db, &name, &models).await?;
+    Ok(Json(group_view(&state, group)))
+}
+
+pub async fn update_group(State(state): St, _: Admin, Path(id): Path<i64>, Json(req): Json<db::groups::GroupInput>) -> Result<Json<GroupView>> {
+    let (name, models) = checked_group(&state, &req, Some(id)).await?;
+    let group = db::groups::update(&state.db, id, &name, &models).await?.or_not_found()?;
+    Ok(Json(group_view(&state, group)))
+}
+
+pub async fn delete_group(State(state): St, _: Admin, Path(id): Path<i64>) -> Result<StatusCode> {
+    db::groups::delete(&state.db, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn limits(State(state): St, _: Admin) -> Result<Json<Vec<LimitUse>>> {
     Ok(Json(with_usage(&state, limits::list(&state.db).await?).await?))
 }

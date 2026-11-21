@@ -45,7 +45,7 @@ async fn the_oldest_layout_is_brought_up_to_date() {
     for _ in 0..2 {
         let app = App::new(&config()).await;
         let (version,): (i64,) = sqlx::query_as("PRAGMA user_version").fetch_one(&app.state.db).await.unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
 
         let relay = common::Relay { app, upstream: common::Upstream::start().await, admin: String::new() };
         let sso = relay.lan("GET", "/auth/sso", &[("x-hc-user-id", "yao"), ("x-hc-user-role", "ADMIN")], None).await;

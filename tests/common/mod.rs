@@ -28,7 +28,8 @@ pub struct Seen {
 /// An upstream that answers like Kimi would: an OpenAI side under /v1 and an Anthropic side.
 /// The key `bad` is always refused with 401, `chatbad` only for chat. For chat, as Kimi answers
 /// them: `spent` has used up its weekly quota (429) and `busy2` is at its concurrency limit
-/// (403) for its first two requests. Any other key works.
+/// (403) for its first two requests. Any other key works. Whatever the key, chat with the model
+/// `overloaded` gets 529, and streamed chat with `cut` breaks off after its first chunk.
 pub struct Upstream {
     pub base: String,
     pub seen: Arc<Mutex<Vec<Seen>>>,
@@ -41,6 +42,7 @@ impl Upstream {
             .route("/v1/models", get(models))
             .route("/v1/chat/completions", post(chat))
             .route("/v1/messages", post(messages))
+            .route("/v1/responses", post(responses))
             .with_state(seen.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -89,6 +91,23 @@ async fn chat(State(seen): State<Arc<Mutex<Vec<Seen>>>>, headers: HeaderMap, bod
         return (StatusCode::FORBIDDEN, r#"{"error":{"message":"You've reached your concurrent request limit.","type":"access_terminated_error"}}"#).into_response();
     }
     let req: Value = serde_json::from_slice(&body).unwrap_or_default();
+    if req["model"] == "overloaded" {
+        return (StatusCode::from_u16(529).unwrap(), r#"{"error":{"message":"overloaded"}}"#).into_response();
+    }
+    if req["model"] == "cut" && req["stream"] == true {
+        // The first chunk goes out, and only then does the upstream go away
+        let chunks = futures::stream::unfold(0, |n| async move {
+            match n {
+                0 => Some((Ok(Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"half\"}}]}\n\n")), 1)),
+                1 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    Some((Err(std::io::Error::other("upstream went away")), 2))
+                }
+                _ => None,
+            }
+        });
+        return ([("content-type", "text/event-stream")], Body::from_stream(chunks)).into_response();
+    }
     if req["stream"] == true {
         let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
                    data: {\"choices\":[],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":4}}\n\n\
@@ -109,10 +128,20 @@ async fn messages(State(seen): State<Arc<Mutex<Vec<Seen>>>>, headers: HeaderMap,
     axum::Json(json!({ "type": "message", "content": [{ "type": "text", "text": "ok" }], "usage": { "input_tokens": 3, "output_tokens": 2 } })).into_response()
 }
 
+async fn responses(State(seen): State<Arc<Mutex<Vec<Seen>>>>, headers: HeaderMap, body: Bytes) -> Response {
+    record(&seen, "/v1/responses", &headers, &body);
+    if refused(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    axum::Json(json!({ "object": "response", "output_text": "ok", "usage": { "input_tokens": 4, "output_tokens": 1 } })).into_response()
+}
+
 pub struct Resp {
     pub status: StatusCode,
     pub headers: HeaderMap,
     pub text: String,
+    /// The body broke off before its end
+    pub broken: bool,
 }
 
 impl Resp {
@@ -188,8 +217,23 @@ impl Relay {
         let resp = router.oneshot(req.body(body).unwrap()).await.unwrap();
         let status = resp.status();
         let headers = resp.headers().clone();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        Resp { status, headers, text: String::from_utf8_lossy(&bytes).into_owned() }
+        // Read frame by frame, keeping what arrived before a body that breaks off
+        let mut body = resp.into_body();
+        let (mut bytes, mut broken) = (Vec::new(), false);
+        while let Some(frame) = body.frame().await {
+            match frame {
+                Ok(f) => {
+                    if let Ok(data) = f.into_data() {
+                        bytes.extend_from_slice(&data);
+                    }
+                }
+                Err(_) => {
+                    broken = true;
+                    break;
+                }
+            }
+        }
+        Resp { status, headers, text: String::from_utf8_lossy(&bytes).into_owned(), broken }
     }
 
     pub async fn lan(&self, method: &str, path: &str, headers: &[(&str, &str)], body: Option<Value>) -> Resp {

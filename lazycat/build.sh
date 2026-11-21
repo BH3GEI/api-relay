@@ -3,9 +3,15 @@
 # Needs the musl cross toolchain (macOS: brew install filosottile/musl-cross/musl-cross).
 set -e
 cd "$(dirname "$0")/.."
-export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
-export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
-cargo build --release --target x86_64-unknown-linux-musl
+BINARY=target/x86_64-unknown-linux-musl/release/api-relay
+# API_RELAY_BINARY: a binary built elsewhere (e.g. on a Linux build machine) instead of building here
+if [ -n "$API_RELAY_BINARY" ]; then
+  BINARY=$API_RELAY_BINARY
+else
+  export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
+  export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
+  cargo build --release --target x86_64-unknown-linux-musl
+fi
 
 # cloudflared, pinned and checked against the hash in Cloudflare's release notes
 CLOUDFLARED_VERSION=2026.10.0
@@ -32,7 +38,8 @@ echo "$FRP_SHA256  $FRP" | shasum -a 256 -c -
 
 rm -rf lazycat/content
 mkdir -p lazycat/content
-cp target/x86_64-unknown-linux-musl/release/api-relay lazycat/start.sh lazycat/content/
+cp "$BINARY" lazycat/content/api-relay
+cp lazycat/start.sh lazycat/content/
 cp "$CLOUDFLARED" lazycat/content/cloudflared
 # cloudflared is Apache-2.0; its license travels with the binary
 cp lazycat/cloudflared.LICENSE LICENSE lazycat/content/

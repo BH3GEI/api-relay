@@ -129,8 +129,53 @@ function renderModels(ids) {
   document.getElementById('models-body').innerHTML = ids.map(id => `<tr><td><code>${esc(id)}</code></td></tr>`).join('')
     || '<tr><td style="color:#666">No models yet. Add a provider and a key.</td></tr>';
 }
-async function loadModels() { renderModels(await api('/admin/catalog')); }
-async function refreshModels() { renderModels(await api('/admin/catalog/refresh', { method:'POST' })); }
+async function loadModels() { renderModels(await api('/admin/catalog')); loadGroups(); }
+async function refreshModels() { renderModels(await api('/admin/catalog/refresh', { method:'POST' })); loadGroups(); }
+
+// Model groups
+let groups = [], editingGroup = null;
+async function loadGroups() {
+  groups = await api('/admin/groups');
+  document.getElementById('groups-body').innerHTML = groups.map(g => `<tr>
+    <td><code>${esc(g.name)}</code></td>
+    <td>${g.models.map(m => `<code${g.unknown.includes(m) ? ' style="color:#f87171" title="Not in the model list now; skipped"' : ''}>${esc(m)}</code>`).join(' → ')}</td>
+    <td class="actions">
+      <button class="btn-sm secondary" onclick="editGroup(${g.id})">Edit</button>
+      <button class="btn-danger btn-sm" onclick="deleteGroup(${g.id})">Delete</button>
+    </td></tr>`).join('') || '<tr><td colspan="3" style="color:#666">No groups yet.</td></tr>';
+}
+function editGroup(id) {
+  const g = groups.find(g => g.id === id);
+  editingGroup = id;
+  document.getElementById('g-name').value = g.name;
+  document.getElementById('g-models').value = g.models.join(', ');
+  document.getElementById('g-save').textContent = 'Save Group';
+  document.getElementById('g-cancel').classList.remove('hidden');
+}
+function resetGroupForm() {
+  editingGroup = null;
+  document.getElementById('g-name').value = '';
+  document.getElementById('g-models').value = '';
+  document.getElementById('g-save').textContent = 'Add Group';
+  document.getElementById('g-cancel').classList.add('hidden');
+  document.getElementById('g-msg').textContent = '';
+}
+async function saveGroup() {
+  const body = JSON.stringify({ name: document.getElementById('g-name').value, models: document.getElementById('g-models').value });
+  try {
+    if (editingGroup) await api('/admin/groups/' + editingGroup, { method:'PUT', body });
+    else await api('/admin/groups', { method:'POST', body });
+    resetGroupForm();
+  } catch (e) {
+    document.getElementById('g-msg').textContent = 'Not saved: the name must be a valid model name that no provider model or other group uses, and the models must be model ids (not groups).';
+  }
+  loadGroups();
+}
+async function deleteGroup(id) {
+  if (!confirm('Delete group?')) return;
+  await api('/admin/groups/' + id, { method:'DELETE' });
+  loadGroups();
+}
 
 // Usage
 // All users, or one; any range, split and filtered
@@ -415,7 +460,7 @@ async function loadRequests(more) {
   const html = rows.map(c => `<tr onclick="showRequest(${c.id})">
     <td style="white-space:nowrap">${fmtTime(c.started_at)}</td>
     <td>${esc(c.username)}</td>
-    <td><code>${esc(c.model || '-')}</code>${c.stream ? ' <span style="color:#666">stream</span>' : ''}${c.endpoint === 'chat_completions' ? '' : ` <span style="color:#666">${esc(c.endpoint)}</span>`}</td>
+    <td><code>${esc(c.model || '-')}</code>${c.provider && c.upstream_model && c.model !== c.provider + '/' + c.upstream_model && c.model !== c.upstream_model ? ` <span style="color:#888">→ <code>${esc(c.provider + '/' + c.upstream_model)}</code></span>` : ''}${c.stream ? ' <span style="color:#666">stream</span>' : ''}${c.endpoint === 'chat_completions' ? '' : ` <span style="color:#666">${esc(c.endpoint)}</span>`}</td>
     <td>${statusCell(c)}</td>
     <td><code>${esc(c.key || '-')}</code></td>
     <td>${esc(c.entry)}</td>

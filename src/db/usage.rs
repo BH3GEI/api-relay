@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 use super::Db;
 
 /// Record a request as it starts, so concurrent requests count against limits; tokens are filled in later.
-pub async fn start(db: &Db, user_id: i64, model: &str) -> sqlx::Result<i64> {
-    let (id,): (i64,) = sqlx::query_as("INSERT INTO usage_logs (user_id, model) VALUES (?, ?) RETURNING id")
-        .bind(user_id).bind(model).fetch_one(db).await?;
+/// `model` is the catalog id that serves it, `via_group` the model group it was asked for by, if any.
+pub async fn start(db: &Db, user_id: i64, model: &str, via_group: Option<&str>) -> sqlx::Result<i64> {
+    let (id,): (i64,) = sqlx::query_as("INSERT INTO usage_logs (user_id, model, via_group) VALUES (?, ?, ?) RETURNING id")
+        .bind(user_id).bind(model).bind(via_group).fetch_one(db).await?;
     Ok(id)
 }
 

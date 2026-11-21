@@ -1,4 +1,4 @@
-//! The model list, in a shape both OpenAI and Anthropic model-list clients accept.
+//! The model list, model groups included, in a shape both OpenAI and Anthropic model-list clients accept.
 
 use axum::{Json, extract::{Path, State}};
 use serde_json::{Value, json};
@@ -8,7 +8,16 @@ use crate::{AppState, db, error::{OrNotFound, Result}};
 
 async fn model_objects(state: &AppState) -> Result<Vec<Value>> {
     let providers: HashMap<i64, String> = db::providers::list(&state.db).await?.into_iter().map(|p| (p.id, p.name)).collect();
-    Ok(state.catalog.entries().into_iter().map(|e| {
+    // Model groups first: a client picks one like any model, and the relay picks what serves it
+    let groups = db::groups::list(&state.db).await?.into_iter().map(|g| json!({
+        "id": g.name,
+        "display_name": format!("{} (group: {})", g.name, g.members().join(" → ")),
+        "object": "model",
+        "type": "model",
+        "owned_by": "relay",
+        "models": g.members(),
+    }));
+    Ok(groups.chain(state.catalog.entries().into_iter().map(|e| {
         // Keep the upstream's metadata (context length, modalities, …) under our id
         let mut m = match e.meta {
             Value::Object(o) => o,
@@ -21,7 +30,7 @@ async fn model_objects(state: &AppState) -> Result<Vec<Value>> {
         m.insert("type".into(), "model".into());
         m.insert("owned_by".into(), providers.get(&e.provider_id).cloned().unwrap_or_default().into());
         Value::Object(m)
-    }).collect())
+    })).collect())
 }
 
 /// `GET /v1/models`

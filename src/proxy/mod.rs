@@ -1,5 +1,6 @@
 //! The relayed API: requests are forwarded as they are to the provider behind the requested
-//! model, with only the model name changed, on the first of its keys that works.
+//! model, with only the model name changed, on the first of its keys that works. A model group
+//! stands for several models, tried in turn until one answers.
 
 pub mod files;
 pub mod models;
@@ -117,16 +118,79 @@ async fn relay(State(state): State<Arc<AppState>>, Caller(user): Caller, origin:
 }
 
 async fn forward(state: &AppState, user: &User, headers: &HeaderMap, body: String, endpoint: Endpoint, capture: &mut Capture) -> Result<Response> {
-    let mut body: Value = serde_json::from_str(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let body: Value = serde_json::from_str(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let requested = body["model"].as_str().ok_or(StatusCode::BAD_REQUEST)?.to_string();
     capture.model(&requested);
-    let (provider, entry) = state.catalog.resolve(state, &requested).await
-        .ok_or_else(|| Error::api(StatusCode::NOT_FOUND, "not_found_error", format!("Unknown model {requested}")))?;
+    let mut attempts = Vec::new();
+    let Some(group) = find_group(state, &requested).await? else {
+        return match try_model(state, user, headers, &body, &requested, None, endpoint, capture, &mut attempts).await {
+            Tried::Answered(answer) => answer,
+            Tried::Failed { error, .. } => Err(error),
+        };
+    };
+    // A group's models are tried in turn until one answers. Only before an answer starts: once
+    // a response is passed on (streaming or not), it is the answer, whatever becomes of it.
+    let mut failures = Vec::new();
+    for model in group.members() {
+        match try_model(state, user, headers, &body, &model, Some(&group.name), endpoint, capture, &mut attempts).await {
+            Tried::Answered(answer) => return answer,
+            Tried::Failed { reason, status, .. } => {
+                eprintln!("group {}: {model} failed ({reason}), trying the next", group.name);
+                failures.push((model, reason, status));
+            }
+        }
+    }
+    Err(group_failed(&group.name, &failures))
+}
+
+/// The model group a requested name stands for. A name with a bracketed suffix (`auto[1m]`)
+/// finds the group without it, and the other way round, as clients add or drop such suffixes.
+async fn find_group(state: &AppState, requested: &str) -> Result<Option<db::groups::Group>> {
+    if let Some(g) = db::groups::by_name(&state.db, requested).await? {
+        return Ok(Some(g));
+    }
+    let bare = |name: &str| -> String {
+        match name.strip_suffix(']').and_then(|n| n.rfind('[').map(|i| n[..i].to_string())) {
+            Some(b) if !b.is_empty() => b,
+            _ => name.to_string(),
+        }
+    };
+    let wanted = bare(requested);
+    Ok(db::groups::list(&state.db).await?.into_iter().find(|g| bare(&g.name) == wanted))
+}
+
+/// What became of trying one model.
+enum Tried {
+    /// What the client gets: the upstream's answer, or an error that trying another model won't fix
+    Answered(Result<Response>),
+    /// This model couldn't serve the request; a group moves on to its next model
+    Failed { error: Error, reason: String, status: Option<u16> },
+}
+
+/// Upstream answers that one model gives where another might not: it doesn't know the model, or
+/// it is overloaded or broken. Keys being refused or rate limited show as `pool::Exhausted`.
+fn worth_another_model(status: u16) -> bool {
+    status == 404 || status == 408 || status >= 500
+}
+
+/// Send the request to `model` (a catalog id), on the first of its keys that works.
+/// `group` is the model group it is tried for, if any.
+#[allow(clippy::too_many_arguments)]
+async fn try_model(state: &AppState, user: &User, headers: &HeaderMap, body: &Value, model: &str, group: Option<&str>, endpoint: Endpoint, capture: &mut Capture, attempts: &mut Vec<pool::Attempt>) -> Tried {
+    let fail = |error: Error, reason: String, status: Option<u16>| Tried::Failed { error, reason, status };
+    let Some((provider, entry)) = state.catalog.resolve(state, model).await else {
+        return fail(Error::api(StatusCode::NOT_FOUND, "not_found_error", format!("Unknown model {model}")), "not in the model list".into(), None);
+    };
     let stream = body["stream"].as_bool().unwrap_or(false);
     capture.route(&provider.name, &entry.upstream_model, stream);
     // Limits and usage go by the catalog id, so `m1` and `kimi/m1` count as one model
-    let usage = admit(state, user, &entry.id, endpoint.counts()).await?;
+    let usage = match admit(state, user, &entry.id, group, endpoint.counts()).await {
+        Ok(usage) => usage,
+        Err(e @ Error::Api { .. }) => return fail(e, "usage limit reached".into(), Some(429)),
+        Err(e) => return Tried::Answered(Err(e)),
+    };
 
+    let mut body = body.clone();
     body["model"] = Value::String(entry.upstream_model.clone());
     if stream && endpoint == Endpoint::ChatCompletions && body.get("stream_options").is_none() {
         // Without this, streamed Chat Completions never report token usage
@@ -140,9 +204,12 @@ async fn forward(state: &AppState, user: &User, headers: &HeaderMap, body: Strin
     let anthropic_version = headers.get("anthropic-version").and_then(|v| v.to_str().ok()).unwrap_or("2023-06-01");
     let anthropic_beta = headers.get("anthropic-beta").and_then(|v| v.to_str().ok());
 
-    let keys = db::providers::usable_keys(&state.db, provider.id).await?;
-    let mut attempts = Vec::new();
-    let sent = state.keys.send(keys, &mut attempts, |key| {
+    let keys = match db::providers::usable_keys(&state.db, provider.id).await {
+        Ok(keys) => keys,
+        Err(e) => return Tried::Answered(Err(e.into())),
+    };
+    let first = attempts.len();
+    let sent = state.keys.send(keys, attempts, |key| {
         let mut req = state.http_client.post(&url)
             .header("Content-Type", "application/json")
             .header("User-Agent", &provider.user_agent)
@@ -162,7 +229,12 @@ async fn forward(state: &AppState, user: &User, headers: &HeaderMap, body: Strin
             }
         }
     }).await;
-    capture.attempts(attempts);
+    if group.is_some() {
+        for a in &mut attempts[first..] {
+            a.model = Some(entry.id.clone());
+        }
+    }
+    capture.attempts(attempts.clone());
 
     let resp = match sent {
         Ok(resp) if resp.status().is_success() => resp,
@@ -172,17 +244,33 @@ async fn forward(state: &AppState, user: &User, headers: &HeaderMap, body: Strin
                 usage.discard().await;
             }
             return match refused {
-                Ok(resp) => pass_through(resp, None, capture.take()),
-                Err(e) => Err(exhausted(e)),
+                Ok(resp) if group.is_some() && worth_another_model(resp.status().as_u16()) => {
+                    let status = resp.status().as_u16();
+                    // The body isn't passed on: upstream errors can name the account behind the key
+                    let error = Error::api(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), "api_error", format!("Upstream answered {status}"));
+                    fail(error, format!("upstream answered {status}"), Some(status))
+                }
+                Ok(resp) => Tried::Answered(pass_through(resp, None, capture.take())),
+                Err(e) => {
+                    let reason = match e.last_status {
+                        Some(code) => format!("all keys unavailable (last upstream status {code})"),
+                        None => "no key could reach the upstream".into(),
+                    };
+                    let status = e.last_status;
+                    fail(exhausted(e), reason, status)
+                }
             };
         }
     };
-    match usage {
+    Tried::Answered(match usage {
         Some(usage) if endpoint.is_text() && stream => pass_through(resp, Some(usage), capture.take()),
         Some(usage) if endpoint.is_text() => {
             let status = resp.status();
             capture.answer(status.as_u16());
-            let bytes = resp.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+            let bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(_) => return Tried::Answered(Err(StatusCode::BAD_GATEWAY.into())),
+            };
             capture.chunk(&bytes);
             let (input, output) = tokens::from_body(&bytes);
             capture.tokens(input, output);
@@ -192,7 +280,23 @@ async fn forward(state: &AppState, user: &User, headers: &HeaderMap, body: Strin
         }
         // Generated media report no tokens; the request is what counts
         _ => pass_through(resp, None, capture.take()),
+    })
+}
+
+/// Every model of a group failed: say why each did, without any upstream's own error body.
+fn group_failed(group: &str, failures: &[(String, String, Option<u16>)]) -> Error {
+    if failures.is_empty() {
+        return Error::api(StatusCode::BAD_GATEWAY, "api_error", format!("Model group {group} has no models"));
     }
+    let reasons = failures.iter().map(|(m, why, _)| format!("{m}: {why}")).collect::<Vec<_>>().join("; ");
+    // Rate limited everywhere reads as a rate limit, so clients back off and retry; anything
+    // else as a gateway error. Never the upstreams' 401, which clients take for their own key.
+    let (status, kind) = if failures.iter().all(|(_, _, s)| *s == Some(429)) {
+        (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error")
+    } else {
+        (StatusCode::BAD_GATEWAY, "api_error")
+    };
+    Error::api(status, kind, format!("Every model in group {group} failed: {reasons}"))
 }
 
 /// A request being counted: recorded as it starts, so concurrent requests count against limits.
@@ -239,7 +343,7 @@ impl Drop for Tap {
 
 /// Check the caller's limits for `model` and, when the call `counts`, record it — both under
 /// one lock, so parallel requests can't all slip past a limit.
-async fn admit(state: &AppState, user: &User, model: &str, counts: bool) -> Result<Option<Usage>> {
+async fn admit(state: &AppState, user: &User, model: &str, group: Option<&str>, counts: bool) -> Result<Option<Usage>> {
     let _admission = state.admission.lock().await;
     if !db::limits::allows(&state.db, user.id, model).await? {
         return Err(Error::api(StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", format!("Usage limit reached for {model}")));
@@ -247,7 +351,7 @@ async fn admit(state: &AppState, user: &User, model: &str, counts: bool) -> Resu
     if !counts {
         return Ok(None);
     }
-    let id = db::usage::start(&state.db, user.id, model).await?;
+    let id = db::usage::start(&state.db, user.id, model, group).await?;
     Ok(Some(Usage { db: state.db.clone(), id }))
 }
 

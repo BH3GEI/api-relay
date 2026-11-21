@@ -7,6 +7,15 @@ use super::Db;
 const STEPS: &[&[&str]] = &[
     // 2: users can opt out of having their requests recorded in full
     &["ALTER TABLE users ADD COLUMN record_content BOOLEAN NOT NULL DEFAULT TRUE"],
+    // 3: model groups, and which group a counted request was made through
+    &[
+        "CREATE TABLE model_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            models TEXT NOT NULL
+        )",
+        "ALTER TABLE usage_logs ADD COLUMN via_group TEXT",
+    ],
 ];
 
 pub async fn migrate(db: &Db) {

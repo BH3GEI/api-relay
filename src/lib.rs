@@ -140,6 +140,8 @@ fn lan_routes() -> Routes {
         .route("/admin/keys/delete/:id", delete(admin::delete_key))
         .route("/admin/keys/priority/:id", put(admin::set_key_priority))
         .route("/admin/catalog", get(admin::catalog))
+        .route("/admin/groups", get(admin::groups).post(admin::create_group))
+        .route("/admin/groups/:id", put(admin::update_group).delete(admin::delete_group))
         .route("/admin/catalog/refresh", post(admin::refresh_catalog))
         .route("/admin/usage", get(admin::usage))
         .route("/admin/requests", get(admin::requests))

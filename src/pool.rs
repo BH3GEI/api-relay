@@ -27,6 +27,9 @@ pub struct Exhausted {
 /// One try of one key, for the record of the call.
 #[derive(Clone, Serialize)]
 pub struct Attempt {
+    /// The model tried, when a model group tried several
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// The key's last few characters
     pub key: String,
     /// The upstream's status; None when it couldn't be reached
@@ -112,7 +115,7 @@ impl KeyPool {
             for key in &keys {
                 let tried = Instant::now();
                 let mut attempt = |status, served, failure: Option<String>, detail: Option<String>| attempts.push(Attempt {
-                    key: tail(key).to_string(), status, served, failure,
+                    model: None, key: tail(key).to_string(), status, served, failure,
                     detail: detail.map(|d| d.chars().take(DETAIL_MAX).collect()),
                     ms: tried.elapsed().as_millis() as u64,
                 });

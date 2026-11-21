@@ -175,7 +175,7 @@ fn extra_models(list: &str) -> Vec<(&str, Option<u64>)> {
         .collect()
 }
 
-fn valid_model_id(id: &str) -> bool {
+pub fn valid_model_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128
         && id.chars().all(|c| c.is_ascii_alphanumeric() || "._:/@+-[]".contains(c))
 }

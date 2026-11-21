@@ -671,3 +671,166 @@ async fn every_call_is_recorded_in_full_unless_the_user_opts_out() {
     // Users can't see the record
     assert_eq!(r.lan("GET", "/admin/requests", &auth, None).await.status, StatusCode::UNAUTHORIZED);
 }
+
+// ── Model groups ──
+
+/// Providers on the fake upstream for group tests: `a` has only a spent key (429), `b` a good
+/// one, `dead` a refused one (401), and `c` a good key with the models `overloaded` (529) and `cut`.
+async fn group_providers(r: &Relay) {
+    r.provider("a", &["spent"]).await;
+    r.provider("b", &["good"]).await;
+    for (name, key, models) in [("dead", "bad", "x1"), ("c", "good", "overloaded, cut")] {
+        let p = r.admin("POST", "/admin/providers", Some(json!({ "name": name, "base_url": format!("{}/v1", r.upstream.base), "user_agent": "t", "models": models }))).await.json();
+        r.admin("POST", &format!("/admin/keys/{}", p["id"]), Some(json!({ "api_key": key }))).await;
+    }
+    r.admin("POST", "/admin/catalog/refresh", None).await;
+}
+
+async fn group(r: &Relay, name: &str, models: Value) -> Value {
+    let g = r.admin("POST", "/admin/groups", Some(json!({ "name": name, "models": models }))).await;
+    assert_eq!(g.status, StatusCode::OK, "{}", g.text);
+    g.json()
+}
+
+#[tokio::test]
+async fn admins_manage_model_groups_and_clients_see_them() {
+    let r = Relay::start().await;
+    group_providers(&r).await;
+    let g = group(&r, "auto", json!("a/m1, b/m2\nzhipu/glm-5.3")).await;
+    assert_eq!((g["models"].clone(), g["unknown"].clone()), (json!(["a/m1", "b/m2", "zhipu/glm-5.3"]), json!(["zhipu/glm-5.3"])));
+    // Taken names, catalog ids, groups as members, bad names and empty lists are refused
+    assert_eq!(r.admin("POST", "/admin/groups", Some(json!({ "name": "auto", "models": ["b/m1"] }))).await.status, StatusCode::CONFLICT);
+    for bad in [json!({ "name": "b/m1", "models": ["a/m1"] }), json!({ "name": "two", "models": ["auto"] }), json!({ "name": "a b<", "models": ["a/m1"] }), json!({ "name": "empty", "models": "" })] {
+        assert_eq!(r.admin("POST", "/admin/groups", Some(bad.clone())).await.status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+    }
+    let id = g["id"].as_i64().unwrap();
+    let edited = r.admin("PUT", &format!("/admin/groups/{id}"), Some(json!({ "name": "auto", "models": ["b/m2", "a/m1"] }))).await.json();
+    assert_eq!(edited["models"], json!(["b/m2", "a/m1"]));
+    assert_eq!(r.admin("GET", "/admin/groups", None).await.json()[0]["models"], json!(["b/m2", "a/m1"]));
+
+    let (_, key) = r.user("bob", "bobpassword1").await;
+    let h = [("authorization", bearer(&key))];
+    let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let models = r.public("GET", "/v1/models", &h, None).await.json();
+    assert_eq!((models["data"][0]["id"].clone(), models["data"][0]["models"].clone()), (json!("auto"), json!(["b/m2", "a/m1"])));
+    assert_eq!(r.public("GET", "/v1/models/auto", &h, None).await.json()["owned_by"], "relay");
+
+    assert_eq!(r.admin("DELETE", &format!("/admin/groups/{id}"), None).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "auto", "messages": [] }))).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_group_moves_on_when_a_model_cannot_serve() {
+    let r = Relay::start().await;
+    group_providers(&r).await;
+    group(&r, "auto", json!(["a/m1", "b/m2"])).await;
+    group(&r, "busy", json!(["c/overloaded", "b/m1"])).await;
+    let (user_id, key) = r.user("bob", "bobpassword1").await;
+    let auth = bearer(&key);
+    let h = [("authorization", auth.as_str())];
+
+    // a/m1's only key is out of quota (429): b/m2 answers, under its own name upstream
+    let resp = r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "auto", "messages": [], "temperature": 0.1 }))).await;
+    assert_eq!(resp.status, StatusCode::OK, "{}", resp.text);
+    let chats = r.upstream.seen("/v1/chat/completions");
+    let tried: Vec<_> = chats.iter().map(|s| (s.headers["authorization"].to_str().unwrap().to_string(), s.body["model"].clone())).collect();
+    assert_eq!(tried, [("Bearer spent".into(), json!("m1")), ("Bearer good".into(), json!("m2"))]);
+    assert_eq!(chats[1].body, json!({ "model": "m2", "messages": [], "temperature": 0.1 }));
+
+    // An upstream that is overloaded (529) hands over too; a suffix like [1m] finds the group
+    let resp = r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "busy[1m]", "messages": [] }))).await;
+    assert_eq!(resp.status, StatusCode::OK, "{}", resp.text);
+    let last: Vec<_> = r.upstream.seen("/v1/chat/completions").iter().skip(2).map(|s| s.body["model"].clone()).collect();
+    assert_eq!(last, [json!("overloaded"), json!("m1")]);
+
+    // Anthropic Messages and Responses go through groups too
+    let refused_first = group(&r, "anth", json!(["dead/x1", "b/m2"])).await;
+    assert_eq!(refused_first["name"], "anth");
+    let m = r.public("POST", "/v1/messages", &[("x-api-key", &key)], Some(json!({ "model": "anth", "max_tokens": 5, "messages": [] }))).await;
+    assert_eq!(m.status, StatusCode::OK, "{}", m.text);
+    let seen: Vec<_> = r.upstream.seen("/v1/messages").iter().map(|s| (s.headers["x-api-key"].to_str().unwrap().to_string(), s.body["model"].clone())).collect();
+    assert_eq!(seen, [("bad".into(), json!("x1")), ("good".into(), json!("m2"))]);
+    let resp = r.public("POST", "/v1/responses", &h, Some(json!({ "model": "anth", "input": "hi" }))).await;
+    assert_eq!(resp.status, StatusCode::OK, "{}", resp.text);
+    assert_eq!(r.upstream.seen("/v1/responses").last().unwrap().body["model"], "m2");
+
+    // Usage counts the model that served, and notes the group; failed tries don't count
+    let mut rows: Vec<(String, Option<String>)> = vec![];
+    for _ in 0..50 {
+        rows = sqlx::query_as("SELECT model, via_group FROM usage_logs WHERE user_id = ? ORDER BY id").bind(user_id).fetch_all(&r.app.state.db).await.unwrap();
+        if rows.len() >= 4 { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let g = |m: &str, v: &str| (m.to_string(), Some(v.to_string()));
+    assert_eq!(rows, [g("b/m2", "auto"), g("b/m1", "busy"), g("b/m2", "anth"), g("b/m2", "anth")]);
+
+    // The record keeps the group asked for, the model that served, and every try
+    let list = recorded(&r, 4).await;
+    let first = list.as_array().unwrap().iter().find(|c| c["model"] == "auto").unwrap();
+    assert_eq!((first["provider"].clone(), first["upstream_model"].clone(), first["status"].clone(), first["key"].clone()), (json!("b"), json!("m2"), json!(200), json!("good")));
+    let detail = r.admin("GET", &format!("/admin/requests/{}", first["id"]), None).await.json();
+    let attempts: Vec<_> = detail["attempts"].as_array().unwrap().iter().map(|a| (a["model"].clone(), a["status"].clone())).collect();
+    assert_eq!(attempts, [(json!("a/m1"), json!(429)), (json!("b/m2"), json!(200))]);
+    assert_eq!(detail["request"]["model"], "m2");
+}
+
+#[tokio::test]
+async fn a_group_whose_models_all_fail_says_why_each_did() {
+    let r = Relay::start().await;
+    group_providers(&r).await;
+    group(&r, "auto", json!(["a/m1", "dead/x1", "c/overloaded", "zhipu/glm-5.3"])).await;
+    group(&r, "limited", json!(["a/m1"])).await;
+    let (_, key) = r.user("bob", "bobpassword1").await;
+    let auth = bearer(&key);
+    let h = [("authorization", auth.as_str())];
+    let resp = r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "auto", "messages": [] }))).await;
+    assert_eq!(resp.status, StatusCode::BAD_GATEWAY, "{}", resp.text);
+    let message = resp.json()["error"]["message"].as_str().unwrap().to_string();
+    assert_eq!(message, "Every model in group auto failed: a/m1: all keys unavailable (last upstream status 429); \
+        dead/x1: all keys unavailable (last upstream status 401); c/overloaded: upstream answered 529; zhipu/glm-5.3: not in the model list");
+    assert!(!resp.text.contains("a@b.c") && !resp.text.contains("overloaded\"}"), "upstream bodies stay out");
+    // Rate limited everywhere reads as a rate limit
+    let resp = r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "limited", "messages": [] }))).await;
+    assert_eq!((resp.status, resp.json()["error"]["type"].clone()), (StatusCode::TOO_MANY_REQUESTS, json!("rate_limit_error")));
+    // Nothing was counted, and the failure is recorded with its reasons
+    assert_eq!(r.public("GET", "/v1/user/usage", &h, None).await.json()["models"], json!([]));
+    let list = recorded(&r, 2).await;
+    let call = list.as_array().unwrap().iter().find(|c| c["model"] == "auto").unwrap();
+    assert_eq!((call["status"].clone(), call["error"].clone()), (json!(502), json!(message)));
+}
+
+#[tokio::test]
+async fn a_group_does_not_switch_once_a_stream_has_started() {
+    let r = Relay::start().await;
+    group_providers(&r).await;
+    group(&r, "auto", json!(["c/cut", "b/m2"])).await;
+    let (_, key) = r.user("bob", "bobpassword1").await;
+    let auth = bearer(&key);
+    let resp = r.public("POST", "/v1/chat/completions", &[("authorization", &auth)], Some(json!({ "model": "auto", "messages": [], "stream": true }))).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert!(resp.broken, "the break reaches the client");
+    assert!(resp.text.contains("half"));
+    let models: Vec<_> = r.upstream.seen("/v1/chat/completions").iter().map(|s| s.body["model"].clone()).collect();
+    assert_eq!(models, [json!("cut")], "no second model");
+}
+
+#[tokio::test]
+async fn names_that_are_not_groups_behave_as_before() {
+    let r = Relay::start().await;
+    group_providers(&r).await;
+    group(&r, "auto", json!(["c/overloaded", "b/m2"])).await;
+    let (_, key) = r.user("bob", "bobpassword1").await;
+    let auth = bearer(&key);
+    let h = [("authorization", auth.as_str())];
+    // The upstream's own answer is passed on, not switched
+    let resp = r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "c/overloaded", "messages": [] }))).await;
+    assert_eq!(resp.status.as_u16(), 529);
+    assert!(resp.text.contains("overloaded"));
+    let resp = r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "a/m1", "messages": [] }))).await;
+    assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(resp.json()["error"]["message"], "All upstream keys are unavailable (last upstream status 429)");
+    let models: Vec<_> = r.upstream.seen("/v1/chat/completions").iter().map(|s| s.body["model"].clone()).collect();
+    assert_eq!(models, [json!("overloaded"), json!("m1")]);
+    let ok = r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "b/m2", "messages": [] }))).await;
+    assert_eq!(ok.status, StatusCode::OK);
+}
