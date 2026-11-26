@@ -1,0 +1,4 @@
+manifest: ./lzc-manifest.yml
+contentdir: ./lazycat/content
+pkgout: ./dist
+icon: ./lazycat/icon.png

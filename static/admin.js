@@ -50,9 +50,9 @@ async function loadUsers() {
   const tb = document.getElementById('users-body');
   tb.innerHTML = users.map(u => `<tr>
     <td>${u.id}</td><td>${esc(u.username)}</td><td>${esc(u.email || '-')}</td><td><code style="font-size:11px">${esc(u.api_key)}</code></td>
-    <td>${u.is_admin ? 'Yes' : 'No'}</td>
-    <td>${u.record_content ? 'Yes' : '<span style="color:#fbbf24">Opted out</span>'}</td>
-    <td><button class="secondary btn-sm" onclick="setPassword(${u.id})">Set Password</button> <button class="btn-danger btn-sm" onclick="deleteUser(${u.id})">Delete</button></td>
+    <td>${u.is_admin ? '是' : '否'}</td>
+    <td>${u.record_content ? '是' : '<span style="color:#fbbf24">已关闭</span>'}</td>
+    <td><button class="secondary btn-sm" onclick="setPassword(${u.id})">设置密码</button> <button class="btn-danger btn-sm" onclick="deleteUser(${u.id})">删除</button></td>
   </tr>`).join('');
 }
 async function createUser() {
@@ -66,15 +66,15 @@ async function createUser() {
 }
 // For signing in on the public address
 async function setPassword(id) {
-  const pw = prompt('New password (at least 8 characters):');
+  const pw = prompt('新密码（至少 8 位）：');
   if (pw === null) return;
   try {
     await api('/admin/users/'+id+'/password', { method:'PUT', body: JSON.stringify({ password: pw }) });
-    alert('Password set');
-  } catch (e) { alert('Failed: ' + (e.message || 'password too short?')); }
+    alert('密码已设置');
+  } catch (e) { alert('失败：' + (e.message || '密码太短？')); }
 }
 async function deleteUser(id) {
-  if (!confirm('Delete user?')) return;
+  if (!confirm('删除该用户？')) return;
   await api('/admin/users/'+id, { method:'DELETE' });
   loadUsers();
 }
@@ -83,18 +83,19 @@ async function deleteUser(id) {
 // "8 keys · 7 OK · 1 cooling" for the providers table
 function keySummary(keys) {
   const cooling = keys.filter(k => k.status.cooling_secs > 0).length;
-  const parts = [`${keys.length} key${keys.length === 1 ? '' : 's'}`];
-  if (keys.length) parts.push(`<span style="color:#4ade80">${keys.length - cooling} OK</span>`);
-  if (cooling) parts.push(`<span style="color:#f87171">${cooling} cooling</span>`);
+  const parts = [`${keys.length} 把 Key`];
+  if (keys.length) parts.push(`<span style="color:#4ade80">${keys.length - cooling} 把正常</span>`);
+  if (cooling) parts.push(`<span style="color:#f87171">${cooling} 把冷却中</span>`);
   return parts.join(' · ');
 }
 
 async function loadProviders() {
   providers = await api('/admin/providers');
+  document.getElementById('onboard').classList.toggle('hidden', providers.length > 0);
   const keyLists = await Promise.all(providers.map(p => api(`/admin/keys/${p.id}`).catch(() => [])));
   const tb = document.getElementById('providers-body');
   tb.innerHTML = providers.map((p, i) => `<tr>
-    <td><strong>${esc(p.name)}</strong>${p.enabled ? '' : ' <span style="color:#888">(disabled)</span>'}</td>
+    <td><strong>${esc(p.name)}</strong>${p.enabled ? '' : ' <span style="color:#888">（已停用）</span>'}</td>
     <td style="white-space:nowrap">${keySummary(keyLists[i])}</td>
     <td>
       <div><span class="url-label">OpenAI</span><span class="url">${esc(p.base_url)}</span></div>
@@ -102,8 +103,8 @@ async function loadProviders() {
     </td>
     <td>${esc(p.models || '-')}</td>
     <td class="actions">
-      <button class="btn-sm secondary" onclick="showKeys(${p.id})">Manage Keys</button>
-      <button class="btn-danger btn-sm" onclick="deleteProvider(${p.id})">Delete</button>
+      <button class="btn-sm secondary" onclick="showKeys(${p.id})">管理 Key</button>
+      <button class="btn-danger btn-sm" onclick="deleteProvider(${p.id})">删除</button>
     </td>
   </tr>`).join('');
 }
@@ -119,7 +120,7 @@ async function createProvider() {
   loadProviders();
 }
 async function deleteProvider(id) {
-  if (!confirm('Delete provider?')) return;
+  if (!confirm('删除该服务商？')) return;
   await api('/admin/providers/'+id, { method:'DELETE' });
   loadProviders();
 }
@@ -127,7 +128,7 @@ async function deleteProvider(id) {
 // Models
 function renderModels(ids) {
   document.getElementById('models-body').innerHTML = ids.map(id => `<tr><td><code>${esc(id)}</code></td></tr>`).join('')
-    || '<tr><td style="color:#666">No models yet. Add a provider and a key.</td></tr>';
+    || '<tr><td style="color:#666">还没有模型。请先添加服务商和 Key。</td></tr>';
 }
 async function loadModels() { renderModels(await api('/admin/catalog')); loadGroups(); }
 async function refreshModels() { renderModels(await api('/admin/catalog/refresh', { method:'POST' })); loadGroups(); }
@@ -138,25 +139,25 @@ async function loadGroups() {
   groups = await api('/admin/groups');
   document.getElementById('groups-body').innerHTML = groups.map(g => `<tr>
     <td><code>${esc(g.name)}</code></td>
-    <td>${g.models.map(m => `<code${g.unknown.includes(m) ? ' style="color:#f87171" title="Not in the model list now; skipped"' : ''}>${esc(m)}</code>`).join(' → ')}</td>
+    <td>${g.models.map(m => `<code${g.unknown.includes(m) ? ' style="color:#f87171" title="当前不在模型列表中，会被跳过"' : ''}>${esc(m)}</code>`).join(' → ')}</td>
     <td class="actions">
-      <button class="btn-sm secondary" onclick="editGroup(${g.id})">Edit</button>
-      <button class="btn-danger btn-sm" onclick="deleteGroup(${g.id})">Delete</button>
-    </td></tr>`).join('') || '<tr><td colspan="3" style="color:#666">No groups yet.</td></tr>';
+      <button class="btn-sm secondary" onclick="editGroup(${g.id})">编辑</button>
+      <button class="btn-danger btn-sm" onclick="deleteGroup(${g.id})">删除</button>
+    </td></tr>`).join('') || '<tr><td colspan="3" style="color:#666">还没有模型组。</td></tr>';
 }
 function editGroup(id) {
   const g = groups.find(g => g.id === id);
   editingGroup = id;
   document.getElementById('g-name').value = g.name;
   document.getElementById('g-models').value = g.models.join(', ');
-  document.getElementById('g-save').textContent = 'Save Group';
+  document.getElementById('g-save').textContent = '保存模型组';
   document.getElementById('g-cancel').classList.remove('hidden');
 }
 function resetGroupForm() {
   editingGroup = null;
   document.getElementById('g-name').value = '';
   document.getElementById('g-models').value = '';
-  document.getElementById('g-save').textContent = 'Add Group';
+  document.getElementById('g-save').textContent = '添加模型组';
   document.getElementById('g-cancel').classList.add('hidden');
   document.getElementById('g-msg').textContent = '';
 }
@@ -167,12 +168,12 @@ async function saveGroup() {
     else await api('/admin/groups', { method:'POST', body });
     resetGroupForm();
   } catch (e) {
-    document.getElementById('g-msg').textContent = 'Not saved: the name must be a valid model name that no provider model or other group uses, and the models must be model ids (not groups).';
+    document.getElementById('g-msg').textContent = '未保存：组名必须是合法的模型名，且不能与任何服务商模型或其他组重名；成员必须是模型 id（不能是组）。';
   }
   loadGroups();
 }
 async function deleteGroup(id) {
-  if (!confirm('Delete group?')) return;
+  if (!confirm('删除该模型组？')) return;
   await api('/admin/groups/' + id, { method:'DELETE' });
   loadGroups();
 }
@@ -181,7 +182,7 @@ async function deleteGroup(id) {
 // All users, or one; any range, split and filtered
 let usageView = null;
 function loadUsage() {
-  usageView ||= UsageView.mount(document.getElementById('usage-view'), { lang: 'en', admin: true, fetch: q => api('/admin/usage?' + q) });
+  usageView ||= UsageView.mount(document.getElementById('usage-view'), { lang: 'zh', admin: true, fetch: q => api('/admin/usage?' + q) });
   usageView.load();
 }
 
@@ -193,7 +194,7 @@ async function loadLimits() {
     allUsers = await api('/admin/users');
     document.getElementById('lim-user').innerHTML = allUsers.map(u => `<option value="${u.id}">${esc(u.username)}</option>`).join('');
   }
-  const windows = { 18000: '5 hours', 86400: 'day', 604800: 'week' };
+  const windows = { 18000: '每 5 小时', 86400: '每天', 604800: '每周' };
   // "30,000 / 110,000,000" — usage in the current window against the cap
   const cell = (used, max) => {
     if (max < 0) return `${used.toLocaleString()} <span style="color:#666">/ ∞</span>`;
@@ -205,8 +206,8 @@ async function loadLimits() {
     return `<tr><td>${esc(uname)}</td><td>${esc(l.model)}</td><td>${windows[l.window_secs] || l.window_secs + 's'}</td>
       <td style="white-space:nowrap">${cell(l.used.requests, l.max_requests)}</td>
       <td style="white-space:nowrap">${cell(l.used.total_tokens, l.max_tokens)}</td>
-      <td class="actions"><button class="btn-danger btn-sm" onclick="deleteLimit(${l.id})">Delete</button></td></tr>`;
-  }).join('') || '<tr><td colspan="6" style="color:#666">No limits set</td></tr>';
+      <td class="actions"><button class="btn-danger btn-sm" onclick="deleteLimit(${l.id})">删除</button></td></tr>`;
+  }).join('') || '<tr><td colspan="6" style="color:#666">还没有设置限额</td></tr>';
 }
 // Empty means unlimited (-1); 0 is a real limit that blocks the model
 function limitValue(id) {
@@ -223,12 +224,12 @@ async function createLimit() {
       max_tokens: limitValue('lim-tok')
     })});
   } catch (e) {
-    alert('Could not set the limit. The model must be a full id from the Models tab (e.g. kimi/k3), a provider followed by /* (e.g. kimi/*), or * for all.');
+    alert('无法设置限额。模型必须是「模型」页中的完整 id（如 kimi/k3），或 服务商/*（如 kimi/*），或 * 表示全部。');
   }
   loadLimits();
 }
 async function deleteLimit(id) {
-  if (!confirm('Delete limit?')) return;
+  if (!confirm('删除该限额？')) return;
   await api('/admin/limits/'+id, { method:'DELETE' });
   loadLimits();
 }
@@ -239,7 +240,7 @@ let keysTimer = null;
 async function showKeys(pid) {
   currentProviderId = pid;
   const pname = providers.find(p => p.id === pid)?.name ?? pid;
-  document.getElementById('keys-title').textContent = `Keys for "${pname}"`;
+  document.getElementById('keys-title').textContent = `「${pname}」的 Key`;
   document.getElementById('keys-section').classList.remove('hidden');
   await renderKeys();
   document.getElementById('keys-section').scrollIntoView({ behavior: 'smooth' });
@@ -248,27 +249,27 @@ async function showKeys(pid) {
   keysTimer = setInterval(() => { if (!document.hidden) renderKeys().catch(() => {}); }, 10000);
 }
 
-const FAIL_REASONS = { '401': 'invalid key', '403': 'forbidden', '402': 'no balance', '429': 'rate limited',
-  '502': 'upstream error', '503': 'upstream error', '504': 'upstream timeout', 'network error': 'network error' };
+const FAIL_REASONS = { '401': 'Key 无效', '403': '无权限', '402': '余额不足', '429': '被限流',
+  '502': '上游出错', '503': '上游出错', '504': '上游超时', 'network error': '网络错误' };
 
 function ago(unix) {
   if (!unix) return '-';
   const s = Math.max(0, Math.floor(Date.now() / 1000 - unix));
-  if (s < 60) return s + 's ago';
-  if (s < 3600) return Math.floor(s / 60) + 'm ago';
-  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
-  return Math.floor(s / 86400) + 'd ago';
+  if (s < 60) return s + ' 秒前';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+  return Math.floor(s / 86400) + ' 天前';
 }
 
 function keyStatus(st) {
   const reason = FAIL_REASONS[st.last_result] || st.last_result;
   if (st.cooling_secs > 0) {
     const left = st.cooling_secs >= 60 ? Math.ceil(st.cooling_secs / 60) + 'm' : st.cooling_secs + 's';
-    return `<span style="color:#f87171">Cooling ${left}</span> <span style="color:#888">(${esc(reason)})</span>`;
+    return `<span style="color:#f87171">冷却中 ${left}</span> <span style="color:#888">(${esc(reason)})</span>`;
   }
-  if (!st.last_result) return '<span style="color:#888">Unused</span>';
-  if (FAIL_REASONS[st.last_result]) return `<span style="color:#fbbf24">Ready</span> <span style="color:#888">(last: ${esc(reason)})</span>`;
-  return '<span style="color:#4ade80">OK</span>';
+  if (!st.last_result) return '<span style="color:#888">未使用</span>';
+  if (FAIL_REASONS[st.last_result]) return `<span style="color:#fbbf24">可用</span> <span style="color:#888">（上次：${esc(reason)}）</span>`;
+  return '<span style="color:#4ade80">正常</span>';
 }
 
 // "5h 41% · week 29%", colored by how close each window is to its limit
@@ -277,7 +278,7 @@ function quotaCell(windows) {
   return windows.map(w => {
     const pct = Math.round(w.used_percent);
     const color = pct >= 80 ? '#f87171' : pct >= 50 ? '#fbbf24' : '#4ade80';
-    const reset = w.resets_at ? 'resets ' + new Date(w.resets_at * 1000).toLocaleString() : '';
+    const reset = w.resets_at ? '重置于 ' + new Date(w.resets_at * 1000).toLocaleString() : '';
     return `<span title="${reset}"><span style="color:#888">${esc(w.label)}</span> <span style="color:${color}">${pct}%</span></span>`;
   }).join(' · ');
 }
@@ -287,14 +288,14 @@ async function renderKeys() {
   // Requests go to the first key (by priority) that isn't cooling down
   const inUse = keys.find(k => k.enabled && k.status.cooling_secs === 0);
   document.getElementById('keys-body').innerHTML = keys.map(k => `<tr>
-    <td>${k.id}</td><td>${esc(k.label || '-')}${k === inUse ? ' <span style="color:#2563eb">● in use</span>' : ''}</td>
+    <td>${k.id}</td><td>${esc(k.label || '-')}${k === inUse ? ' <span style="color:#2563eb">● 使用中</span>' : ''}</td>
     <td><code style="font-size:11px">${esc(k.api_key)}</code></td>
-    <td><input type="number" value="${k.priority}" style="width:60px;margin:0" title="Lower goes first" onchange="setPriority(${k.id}, this.value)"></td>
+    <td><input type="number" value="${k.priority}" style="width:60px;margin:0" title="数字小的优先" onchange="setPriority(${k.id}, this.value)"></td>
     <td>${keyStatus(k.status)}</td>
     <td style="white-space:nowrap">${quotaCell(k.quota)}</td>
     <td>${ago(k.status.last_used)}</td>
     <td>${k.status.ok} / ${k.status.failed}</td>
-    <td class="actions"><button class="btn-danger btn-sm" onclick="deleteKey(${k.id})">Delete</button></td>
+    <td class="actions"><button class="btn-danger btn-sm" onclick="deleteKey(${k.id})">删除</button></td>
   </tr>`).join('');
 }
 async function setPriority(id, value) {
@@ -312,14 +313,14 @@ async function createKey() {
   loadProviders();
 }
 async function deleteKey(id) {
-  if (!confirm('Delete key?')) return;
+  if (!confirm('删除该 Key？')) return;
   await api('/admin/keys/delete/'+id, { method:'DELETE' });
   await renderKeys();
   loadProviders();
 }
 
 // Public access
-const TUNNEL_STATES = { off: ['Off', '#888'], starting: ['Connecting…', '#fbbf24'], connected: ['Connected', '#4ade80'], reconnecting: ['Reconnecting…', '#fbbf24'], stopped: ['Stopped (retrying)', '#f87171'] };
+const TUNNEL_STATES = { off: ['关闭', '#888'], starting: ['连接中…', '#fbbf24'], connected: ['已连接', '#4ade80'], reconnecting: ['重连中…', '#fbbf24'], stopped: ['已停止（重试中）', '#f87171'] };
 let tunnelTimer = null;
 async function loadTunnel() {
   const st = await api('/admin/tunnel');
@@ -331,7 +332,7 @@ async function loadTunnel() {
   document.getElementById('tunnel-unavailable').classList.toggle('hidden', st.available);
   const [label, color] = TUNNEL_STATES[st.state] || [st.state, '#888'];
   const el = document.getElementById('tunnel-state');
-  el.textContent = st.configured || st.state !== 'off' ? label : 'Not configured';
+  el.textContent = st.configured || st.state !== 'off' ? label : '未配置';
   el.style.color = color;
   document.getElementById('tunnel-log').textContent = st.log.join('\n');
   await loadFrp();
@@ -342,9 +343,9 @@ async function savePublicUrl() {
   const msg = document.getElementById('public-url-msg');
   try {
     await api('/admin/public-url', { method: 'PUT', body: JSON.stringify({ url: document.getElementById('public-url').value }) });
-    msg.textContent = 'Saved. The home page now shows this address.'; msg.style.color = '#4ade80';
+    msg.textContent = '已保存，首页会显示这个地址。'; msg.style.color = '#4ade80';
   } catch (e) {
-    msg.textContent = 'Must be a bare https:// address with no path.'; msg.style.color = '#f87171';
+    msg.textContent = '必须是不带路径的 https:// 地址。'; msg.style.color = '#f87171';
   }
 }
 async function saveTunnel() {
@@ -355,12 +356,12 @@ async function saveTunnel() {
   loadTunnel();
 }
 async function disableTunnel() {
-  if (!confirm('Turn off public access?')) return;
+  if (!confirm('关闭公网访问？')) return;
   await api('/admin/tunnel', { method: 'PUT', body: JSON.stringify({ token: '' }) });
   loadTunnel();
 }
 
-const CERT_STATES = { none: ['None', '#888'], issuing: ['Requesting…', '#fbbf24'], valid: ['Valid', '#4ade80'], failed: ['Failed (retrying hourly)', '#f87171'] };
+const CERT_STATES = { none: ['无', '#888'], issuing: ['申请中…', '#fbbf24'], valid: ['有效', '#4ade80'], failed: ['失败（每小时重试）', '#f87171'] };
 async function loadFrp() {
   const st = await api('/admin/frp');
   document.getElementById('frp-unavailable').classList.toggle('hidden', st.available);
@@ -369,11 +370,11 @@ async function loadFrp() {
     const el = document.getElementById(id);
     if (!el.dataset.loaded) { el.dataset.loaded = '1'; el.value = v; }
   }
-  document.getElementById('frp-token').placeholder = st.has_token ? 'frp token (saved)' : 'frp token';
-  document.getElementById('frp-dns-token').placeholder = st.has_dns_token ? 'Cloudflare DNS API token (saved)' : 'Cloudflare DNS API token';
+  document.getElementById('frp-token').placeholder = st.has_token ? 'frp token（已保存）' : 'frp token';
+  document.getElementById('frp-dns-token').placeholder = st.has_dns_token ? 'Cloudflare DNS API token（已保存）' : 'Cloudflare DNS API token';
   const [label, color] = TUNNEL_STATES[st.state] || [st.state, '#888'];
   const el = document.getElementById('frp-state');
-  el.textContent = st.configured || st.state !== 'off' ? label : 'Not configured';
+  el.textContent = st.configured || st.state !== 'off' ? label : '未配置';
   el.style.color = color;
   const [cl, cc] = CERT_STATES[st.cert] || [st.cert, '#888'];
   const cert = document.getElementById('frp-cert');
@@ -395,14 +396,14 @@ async function saveFrp() {
     await api('/admin/frp', { method: 'PUT', body: JSON.stringify(body) });
     document.getElementById('frp-token').value = '';
     document.getElementById('frp-dns-token').value = '';
-    msg.textContent = 'Saved.'; msg.style.color = '#4ade80';
+    msg.textContent = '已保存。'; msg.style.color = '#4ade80';
   } catch (e) {
-    msg.textContent = 'The server must be host:port.'; msg.style.color = '#f87171';
+    msg.textContent = '服务器格式必须是 主机:端口。'; msg.style.color = '#f87171';
   }
   loadFrp();
 }
 async function disableFrp() {
-  if (!confirm('Turn off frp?')) return;
+  if (!confirm('关闭 frp？')) return;
   await api('/admin/frp', { method: 'PUT', body: JSON.stringify({ server: '' }) });
   document.getElementById('frp-server').value = '';
   loadFrp();
@@ -431,21 +432,21 @@ function fmtBytes(n) {
 function fmtMs(ms) { return ms == null ? '-' : ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(1) + ' s'; }
 function fmtTime(ms) { return new Date(ms).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
 function statusCell(c) {
-  if (c.status == null) return '<span style="color:#888" title="The client left before an answer">left</span>';
+  if (c.status == null) return '<span style="color:#888" title="客户端在收到回答前断开">已断开</span>';
   const ok = c.status >= 200 && c.status < 300;
-  const cut = ok && !c.complete ? ' <span style="color:#fbbf24" title="The client hung up before the response ended">cut</span>' : '';
+  const cut = ok && !c.complete ? ' <span style="color:#fbbf24" title="回复未结束时客户端挂断">中断</span>' : '';
   return `<span style="color:${ok ? '#4ade80' : '#f87171'}" title="${esc(c.error || '')}">${c.status}</span>${cut}`;
 }
 async function loadRequests(more) {
   if (!more) {
     reqOldest = null;
     const exp = document.getElementById('req-export');
-    exp.textContent = 'Export JSONL';
-    api('/admin/requests/export/size?' + reqFilter()).then(s => { exp.textContent = `Export JSONL (≈ ${fmtBytes(s.bytes)})`; }).catch(() => {});
+    exp.textContent = '导出 JSONL';
+    api('/admin/requests/export/size?' + reqFilter()).then(s => { exp.textContent = `导出 JSONL（约 ${fmtBytes(s.bytes)}）`; }).catch(() => {});
     api('/admin/requests/stats').then(s => {
-      const since = s.since ? ' since ' + new Date(s.since).toLocaleDateString() : '';
+      const since = s.since ? '（自 ' + new Date(s.since).toLocaleDateString() + ' 起）' : '';
       document.getElementById('req-stats').textContent =
-        `${s.requests.toLocaleString()} calls recorded${since}, ${s.with_content.toLocaleString()} with content · ${s.parts.toLocaleString()} shared parts · ${fmtBytes(s.bytes)} on disk`;
+        `${s.requests.toLocaleString()} 次调用已记录${since}，其中 ${s.with_content.toLocaleString()} 次含内容 · ${s.parts.toLocaleString()} 个共享片段 · 占用 ${fmtBytes(s.bytes)}`;
     }).catch(() => {});
     const sel = document.getElementById('req-user');
     if (sel.options.length === 1) {
@@ -467,11 +468,11 @@ async function loadRequests(more) {
     <td style="white-space:nowrap">${c.input_tokens.toLocaleString()} / ${c.output_tokens.toLocaleString()}</td>
     <td>${fmtMs(c.first_byte_ms)}</td>
     <td>${fmtMs(c.total_ms)}</td>
-    <td style="white-space:nowrap">${fmtBytes(c.request_bytes)} / ${fmtBytes(c.response_bytes)}${c.content ? '' : ' <span style="color:#666" title="The user opted out of content recording">no content</span>'}</td>
+    <td style="white-space:nowrap">${fmtBytes(c.request_bytes)} / ${fmtBytes(c.response_bytes)}${c.content ? '' : ' <span style="color:#666" title="该用户关闭了内容记录">无内容</span>'}</td>
   </tr>`).join('');
   const tb = document.getElementById('req-body');
   if (more) tb.insertAdjacentHTML('beforeend', html);
-  else tb.innerHTML = html || '<tr><td colspan="10" style="color:#666">No calls recorded yet.</td></tr>';
+  else tb.innerHTML = html || '<tr><td colspan="10" style="color:#666">还没有调用记录。</td></tr>';
   document.getElementById('req-more').classList.toggle('hidden', rows.length < REQ_PAGE);
 }
 
@@ -505,16 +506,16 @@ async function showRequest(id) {
   const d = await api('/admin/requests/' + id);
   const box = document.getElementById('req-detail');
   const meta = [
-    ['Time', fmtTime(d.started_at)], ['User', d.username], ['Endpoint', d.endpoint + (d.stream ? ' (stream)' : '')],
-    ['Model', `${d.model} → ${d.provider ? d.provider + ' / ' + d.upstream_model : '-'}`], ['Status', `${d.status ?? 'client left'}${d.error ? ' · ' + d.error : ''}${d.complete ? '' : ' · incomplete'}`],
-    ['Key', d.key || '-'], ['Via', `${d.entry} · ${d.client_ip || '-'}`], ['User-Agent', d.user_agent || '-'],
-    ['Tokens', `${d.input_tokens.toLocaleString()} in / ${d.output_tokens.toLocaleString()} out`],
-    ['Timing', `first byte ${fmtMs(d.first_byte_ms)} · total ${fmtMs(d.total_ms)}`],
-    ['Size', `${fmtBytes(d.request_bytes)} request / ${fmtBytes(d.response_bytes)} response`],
+    ['时间', fmtTime(d.started_at)], ['用户', d.username], ['接口', d.endpoint + (d.stream ? '（流式）' : '')],
+    ['模型', `${d.model} → ${d.provider ? d.provider + ' / ' + d.upstream_model : '-'}`], ['状态', `${d.status ?? '客户端已断开'}${d.error ? ' · ' + d.error : ''}${d.complete ? '' : ' · 未完整'}`],
+    ['Key', d.key || '-'], ['入口', `${d.entry} · ${d.client_ip || '-'}`], ['User-Agent', d.user_agent || '-'],
+    ['Token', `输入 ${d.input_tokens.toLocaleString()} / 输出 ${d.output_tokens.toLocaleString()}`],
+    ['耗时', `首字节 ${fmtMs(d.first_byte_ms)} · 总计 ${fmtMs(d.total_ms)}`],
+    ['大小', `请求 ${fmtBytes(d.request_bytes)} / 回复 ${fmtBytes(d.response_bytes)}`],
   ].map(([k, v]) => `<div>${k}</div><div>${esc(v)}</div>`).join('');
-  const attempts = (d.attempts || []).map(a => `<tr><td><code>${esc(a.key)}</code></td><td>${a.status ?? 'network error'}</td><td>${esc(a.failure || (a.served ? 'served' : ''))}</td><td>${fmtMs(a.ms)}</td><td style="font-size:11px;color:#888">${esc(a.detail || '')}</td></tr>`).join('');
+  const attempts = (d.attempts || []).map(a => `<tr><td><code>${esc(a.key)}</code></td><td>${a.status ?? '网络错误'}</td><td>${esc(({ Busy: '并发已满', OutOfQuota: '套餐额度用完', Refused: 'Key 被拒绝', Other: '限流或上游出错' })[a.failure] || a.failure || (a.served ? '已应答' : ''))}</td><td>${fmtMs(a.ms)}</td><td style="font-size:11px;color:#888">${esc(a.detail || '')}</td></tr>`).join('');
 
-  let request = '<p style="color:#666">Not recorded: the user opted out.</p>';
+  let request = '<p style="color:#666">未记录：该用户关闭了内容记录。</p>';
   if (d.request != null) {
     const r = d.request;
     const convo = [];
@@ -524,21 +525,21 @@ async function showRequest(id) {
     msgs.forEach(m => convo.push([m.role || m.type || '', messageText(m)]));
     request = `<p style="color:#888;font-size:13px">${msgs.length} messages${r.tools ? ' · ' + r.tools.length + ' tools' : ''}</p>` +
       convo.map(([role, text]) => `<div class="msg-role">${esc(role)}</div><pre>${esc(text)}</pre>`).join('') +
-      `<details><summary>Full request JSON</summary><pre>${esc(JSON.stringify(r, null, 2))}</pre></details>`;
+      `<details><summary>完整请求 JSON</summary><pre>${esc(JSON.stringify(r, null, 2))}</pre></details>`;
   }
-  let response = '<p style="color:#666">Not recorded.</p>';
+  let response = '<p style="color:#666">未记录。</p>';
   if (d.response != null) {
     const assembled = d.stream ? streamText(d.response) : '';
     let pretty = d.response;
     try { pretty = JSON.stringify(JSON.parse(d.response), null, 2); } catch {}
-    response = (assembled ? `<pre>${esc(assembled)}</pre><details><summary>Raw stream</summary><pre>${esc(d.response)}</pre></details>` : `<pre>${esc(pretty)}</pre>`);
+    response = (assembled ? `<pre>${esc(assembled)}</pre><details><summary>原始流</summary><pre>${esc(d.response)}</pre></details>` : `<pre>${esc(pretty)}</pre>`);
   }
-  box.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin-top:0">Call #${d.id}</h2><button class="secondary" onclick="closeRequest()">Close</button></div>
+  box.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin-top:0">调用 #${d.id}</h2><button class="secondary" onclick="closeRequest()">关闭</button></div>
     <div class="meta-grid">${meta}</div>
-    <h2>Attempts</h2>${attempts ? `<table><thead><tr><th>Key</th><th>Status</th><th>Result</th><th>Time</th><th>Upstream said</th></tr></thead><tbody>${attempts}</tbody></table>` : '<p style="color:#666">No upstream was tried.</p>'}
-    <h2>Request</h2>${request}
-    <h2>Response</h2>${response}
-    <details><summary>Client headers</summary><pre>${esc(JSON.stringify(d.headers, null, 2))}</pre></details>`;
+    <h2>尝试过程</h2>${attempts ? `<table><thead><tr><th>Key</th><th>状态</th><th>结果</th><th>耗时</th><th>上游返回</th></tr></thead><tbody>${attempts}</tbody></table>` : '<p style="color:#666">没有尝试任何上游。</p>'}
+    <h2>请求</h2>${request}
+    <h2>回复</h2>${response}
+    <details><summary>客户端请求头</summary><pre>${esc(JSON.stringify(d.headers, null, 2))}</pre></details>`;
   box.classList.remove('hidden');
   box.scrollTop = 0;
 }

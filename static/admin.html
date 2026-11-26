@@ -3,21 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>API Relay Admin</title>
+<title>模型路由器 · 管理</title>
 <link rel="stylesheet" href="/static/base.css">
 <link rel="stylesheet" href="/static/admin.css">
 </head>
 <body>
 <div class="container">
-<h1>Admin Panel</h1>
-<p class="subtitle"><a href="/" style="color:#2563eb;text-decoration:none">&larr; Back</a></p>
+<h1>管理后台</h1>
+<p class="subtitle"><a href="/" style="color:#2563eb;text-decoration:none">&larr; 返回</a></p>
 
 <!-- Login -->
 <div id="login-section">
   <div class="card">
-    <input id="username" placeholder="Username">
-    <input id="password" type="password" placeholder="Password">
-    <button onclick="login()">Login</button>
+    <input id="username" placeholder="用户名">
+    <input id="password" type="password" placeholder="密码">
+    <button onclick="login()">登录</button>
     <div id="login-msg" class="msg hidden"></div>
   </div>
 </div>
@@ -25,162 +25,173 @@
 <!-- Admin content -->
 <div id="admin" class="hidden">
   <div class="tabs">
-    <button class="tab active" onclick="showTab('users')">Users</button>
-    <button class="tab" onclick="showTab('providers')">Providers</button>
-    <button class="tab" onclick="showTab('models')">Models</button>
-    <button class="tab" onclick="showTab('usage')">Usage</button>
-    <button class="tab" onclick="showTab('requests')">Requests</button>
-    <button class="tab" onclick="showTab('limits')">Limits</button>
-    <button class="tab" onclick="showTab('tunnel')">Public Access</button>
+    <button class="tab active" onclick="showTab('users')">用户</button>
+    <button class="tab" onclick="showTab('providers')">服务商</button>
+    <button class="tab" onclick="showTab('models')">模型</button>
+    <button class="tab" onclick="showTab('usage')">用量</button>
+    <button class="tab" onclick="showTab('requests')">调用记录</button>
+    <button class="tab" onclick="showTab('limits')">限额</button>
+    <button class="tab" onclick="showTab('tunnel')">公网访问</button>
+  </div>
+
+  <!-- First run -->
+  <div id="onboard" class="card hidden" style="border-color:#2563eb">
+    <h2>开始使用</h2>
+    <ol style="line-height:1.9;padding-left:20px;font-size:14px">
+      <li>在「服务商」页添加一家模型服务商：名称（如 <code>kimi</code>）、OpenAI Base URL，有 Anthropic 兼容地址的也填上（Claude Code 走这个）。</li>
+      <li>点该服务商的「Key」，填入你自己在服务商处申请的 API Key。可以填多把，数字小的优先，出问题自动换下一把。</li>
+      <li>「模型」页会自动同步模型列表。可以再建一个模型组（如 <code>auto</code> = 包月套餐模型 → 按量计费模型），客户端选组名即可按顺序回退。</li>
+      <li>回到首页，复制你的 Base URL 和 API Key，按首页的说明填进 Claude Code、Codex、Cherry Studio 等客户端。</li>
+    </ol>
+    <p style="color:#888;font-size:13px">本应用不附带任何服务商的 Key，所有 Key 只保存在你自己的微服上。</p>
   </div>
 
   <!-- Users -->
   <div id="tab-users" class="card">
-    <h2>Users</h2>
+    <h2>用户</h2>
     <div style="margin-bottom:12px">
-      <input id="new-user" placeholder="Username">
-      <input id="new-email" type="email" placeholder="Email">
-      <input id="new-pass" type="password" placeholder="Password">
-      <label style="color:#888;font-size:13px"><input type="checkbox" id="new-admin"> Admin</label>
-      <button onclick="createUser()">Add User</button>
+      <input id="new-user" placeholder="用户名">
+      <input id="new-email" type="email" placeholder="邮箱">
+      <input id="new-pass" type="password" placeholder="密码">
+      <label style="color:#888;font-size:13px"><input type="checkbox" id="new-admin"> 管理员</label>
+      <button onclick="createUser()">添加用户</button>
     </div>
-    <table><thead><tr><th>ID</th><th>Username</th><th>Email</th><th>API Key</th><th>Admin</th><th title="Whether their requests and responses are recorded in full; users choose this on the home page">Content recorded</th><th></th></tr></thead><tbody id="users-body"></tbody></table>
+    <table><thead><tr><th>ID</th><th>用户名</th><th>邮箱</th><th>API Key</th><th>管理员</th><th title="是否完整记录该用户的请求和回复内容，由用户在首页自己选择">记录内容</th><th></th></tr></thead><tbody id="users-body"></tbody></table>
   </div>
 
   <!-- Providers -->
   <div id="tab-providers" class="card hidden">
-    <h2>Providers</h2>
+    <h2>服务商</h2>
     <div style="margin-bottom:12px">
-      <input id="p-name" placeholder="Name" style="width:100px">
-      <input id="p-url" placeholder="OpenAI Base URL (…/v1)" style="width:200px">
-      <input id="p-aurl" placeholder="Anthropic Base URL (optional)" style="width:200px">
+      <input id="p-name" placeholder="名称" style="width:100px">
+      <input id="p-url" placeholder="OpenAI Base URL（…/v1）" style="width:200px">
+      <input id="p-aurl" placeholder="Anthropic Base URL（可选）" style="width:200px">
       <input id="p-ua" placeholder="User-Agent" style="width:160px">
-      <input id="p-models" placeholder="Extra models, comma-separated; model=context to declare a context length (optional)" title="e.g. glm-5.3=1048576, my-model=131072" style="width:240px">
-      <button onclick="createProvider()">Add</button>
+      <input id="p-models" placeholder="额外模型，逗号分隔；写成 模型=上下文长度 可声明上下文（可选）" title="例如 glm-5.3=1048576, my-model=131072" style="width:240px">
+      <button onclick="createProvider()">添加</button>
     </div>
-    <table><thead><tr><th>Name</th><th>Keys</th><th>Endpoints</th><th>Extra Models</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>
+    <table><thead><tr><th>名称</th><th>Key</th><th>接口地址</th><th>额外模型</th><th></th></tr></thead><tbody id="providers-body"></tbody></table>
 
     <div id="keys-section" class="hidden" style="margin-top:16px;padding-top:16px;border-top:1px solid #333">
-      <h2 id="keys-title">Keys</h2>
-      <p style="color:#888;font-size:13px">Status is what the relay has seen since it last started. Quota comes from the upstream (hover for reset time; n/a when the upstream doesn't report it). Refreshes every 10s.</p>
+      <h2 id="keys-title">Key</h2>
+      <p style="color:#888;font-size:13px">状态是本次启动以来观察到的情况。套餐用量由上游报告（悬停查看重置时间；上游不报告时显示 n/a）。每 10 秒刷新。</p>
       <div style="margin-bottom:12px">
         <input id="k-key" placeholder="API Key" style="width:280px">
-        <input id="k-label" placeholder="Label (optional)" style="width:120px">
-        <input id="k-priority" placeholder="Priority" value="0" style="width:60px" type="number">
-        <button onclick="createKey()">Add Key</button>
+        <input id="k-label" placeholder="标签（可选）" style="width:120px">
+        <input id="k-priority" placeholder="优先级" value="0" style="width:60px" type="number">
+        <button onclick="createKey()">添加 Key</button>
       </div>
-      <table><thead><tr><th>ID</th><th>Label</th><th>API Key</th><th>Priority</th><th>Status</th><th>Quota used</th><th>Last Used</th><th>OK / Failed</th><th></th></tr></thead><tbody id="keys-body"></tbody></table>
+      <table><thead><tr><th>ID</th><th>标签</th><th>API Key</th><th>优先级</th><th>状态</th><th>套餐已用</th><th>最近使用</th><th>成功 / 失败</th><th></th></tr></thead><tbody id="keys-body"></tbody></table>
     </div>
   </div>
 
   <!-- Models -->
   <div id="tab-models" class="card hidden">
-    <h2>Models</h2>
-    <p style="color:#888;font-size:13px">Synced from each provider every 10 minutes, and right after providers or keys change. Clients use these ids as-is; a bare upstream id works too when only one provider has it.</p>
-    <div style="margin-bottom:12px"><button onclick="refreshModels()">Refresh now</button></div>
-    <table><thead><tr><th>Model</th></tr></thead><tbody id="models-body"></tbody></table>
+    <h2>模型</h2>
+    <p style="color:#888;font-size:13px">每 10 分钟从各服务商同步一次，服务商或 Key 变动后立即同步。客户端直接使用这些模型 id；某个模型只有一家服务商提供时，也可以省略前缀。</p>
+    <div style="margin-bottom:12px"><button onclick="refreshModels()">立即刷新</button></div>
+    <table><thead><tr><th>模型</th></tr></thead><tbody id="models-body"></tbody></table>
 
-    <h2 style="margin-top:28px">Model Groups</h2>
-    <p style="color:#888;font-size:13px">A group is a model name clients can pick (it is listed in /v1/models), standing for models tried in order. When a model's keys are all unavailable, or it answers 404, 408 or 5xx, the next model is tried; once an answer has started, it is not switched. Members not in the model list right now are skipped. A suffix like <code>[1m]</code> on the requested name is ignored when matching.</p>
+    <h2 style="margin-top:28px">模型组（按顺序回退）</h2>
+    <p style="color:#888;font-size:13px">模型组是客户端可以直接选的一个模型名（会出现在 /v1/models 中），代表按顺序尝试的一串模型。某个模型的 Key 全部不可用，或返回 404、408、5xx 时，自动换下一个；回答一旦开始就不再切换。当前不在模型列表中的成员会被跳过。匹配时忽略请求模型名上的 <code>[1m]</code> 等后缀。建议把包月编程套餐排在前面，按量计费的放在后面兜底。</p>
     <div style="margin-bottom:12px">
-      <input id="g-name" placeholder="Group name, e.g. auto" style="width:140px">
-      <input id="g-models" placeholder="Models in order, comma-separated, e.g. kimi/k3.1-pro, ark/ark-code-latest" style="width:420px">
-      <button id="g-save" onclick="saveGroup()">Add Group</button>
-      <button id="g-cancel" class="secondary hidden" onclick="resetGroupForm()">Cancel</button>
+      <input id="g-name" placeholder="组名，例如 auto" style="width:140px">
+      <input id="g-models" placeholder="按顺序填模型，逗号分隔，例如 kimi/k3.1-pro, ark/ark-code-latest" style="width:420px">
+      <button id="g-save" onclick="saveGroup()">添加模型组</button>
+      <button id="g-cancel" class="secondary hidden" onclick="resetGroupForm()">取消</button>
       <span id="g-msg" style="font-size:13px;color:#f87171"></span>
     </div>
-    <table><thead><tr><th>Name</th><th>Models, in order</th><th></th></tr></thead><tbody id="groups-body"></tbody></table>
+    <table><thead><tr><th>名称</th><th>模型（按顺序）</th><th></th></tr></thead><tbody id="groups-body"></tbody></table>
   </div>
 
   <!-- Usage -->
   <div id="tab-usage" class="card hidden">
-    <h2>Usage</h2>
+    <h2>用量</h2>
     <div id="usage-view"></div>
   </div>
 
   <!-- Recorded calls -->
   <div id="tab-requests" class="card hidden">
-    <h2>Requests</h2>
+    <h2>调用记录</h2>
     <p id="req-stats" style="color:#888;font-size:13px"></p>
     <div style="margin:12px 0">
-      <select id="req-user" onchange="loadRequests()"><option value="">All users</option></select>
-      <input id="req-model" placeholder="Model, or provider/*" style="width:180px" onchange="loadRequests()">
-      <select id="req-status" onchange="loadRequests()"><option value="">Any status</option><option value="ok">OK</option><option value="error">Errors</option></select>
-      <button onclick="loadRequests()">Refresh</button>
-      <button class="secondary" id="req-export" onclick="exportRequests()" title="Every matching call in full, one JSON object per line; the size is an estimate">Export JSONL</button>
+      <select id="req-user" onchange="loadRequests()"><option value="">全部用户</option></select>
+      <input id="req-model" placeholder="模型，或 服务商/*" style="width:180px" onchange="loadRequests()">
+      <select id="req-status" onchange="loadRequests()"><option value="">全部状态</option><option value="ok">成功</option><option value="error">出错</option></select>
+      <button onclick="loadRequests()">刷新</button>
+      <button class="secondary" id="req-export" onclick="exportRequests()" title="导出所有符合条件的调用全文，每行一个 JSON 对象；大小为估计值">导出 JSONL</button>
     </div>
-    <table><thead><tr><th>Time</th><th>User</th><th>Model</th><th>Status</th><th>Key</th><th>Via</th><th>Tokens in / out</th><th>First byte</th><th>Total</th><th>Size</th></tr></thead><tbody id="req-body"></tbody></table>
-    <div style="margin-top:12px"><button class="secondary hidden" id="req-more" onclick="loadRequests(true)">Load more</button></div>
+    <table><thead><tr><th>时间</th><th>用户</th><th>模型</th><th>状态</th><th>Key</th><th>入口</th><th>输入 / 输出 token</th><th>首字节</th><th>总耗时</th><th>大小</th></tr></thead><tbody id="req-body"></tbody></table>
+    <div style="margin-top:12px"><button class="secondary hidden" id="req-more" onclick="loadRequests(true)">加载更多</button></div>
   </div>
   <div id="req-detail" class="hidden"></div>
 
   <!-- Public access -->
   <div id="tab-tunnel" class="card hidden">
-    <h2>Public Access (Cloudflare Tunnel)</h2>
+    <h2>公网访问（Cloudflare Tunnel）</h2>
     <p style="color:#888;font-size:13px;line-height:1.6">
-      Makes the API (<code>/v1/…</code> only) reachable from the internet without the LazyCat client.
-      The pages and admin stay behind LazyCat sign-in.<br>
-      In Cloudflare: Zero Trust → Networks → Tunnels → Create a tunnel (cloudflared) → copy its token.
-      Then add a public hostname (e.g. <code>relay.example.com</code>) with service <code>http://localhost:3001</code>.
+      让 API（仅 <code>/v1/…</code>）不装懒猫客户端也能从公网访问；网页和管理后台仍需懒猫登录。<br>
+      在 Cloudflare 中：Zero Trust → Networks → Tunnels → Create a tunnel（cloudflared）→ 复制 token。
+      再添加一个公网主机名（例如 <code>relay.example.com</code>），服务填 <code>http://localhost:3001</code>。
     </p>
-    <div id="tunnel-unavailable" class="msg error hidden">This build has no cloudflared or no public listener.</div>
+    <div id="tunnel-unavailable" class="msg error hidden">此版本没有 cloudflared 或公网监听。</div>
     <div style="margin:12px 0">
       <input id="tunnel-token" type="password" placeholder="Tunnel token" style="width:420px" autocomplete="off">
-      <button onclick="saveTunnel()">Save &amp; connect</button>
-      <button class="btn-danger" onclick="disableTunnel()">Turn off</button>
+      <button onclick="saveTunnel()">保存并连接</button>
+      <button class="btn-danger" onclick="disableTunnel()">关闭</button>
     </div>
-    <p>Status: <strong id="tunnel-state">-</strong></p>
+    <p>状态：<strong id="tunnel-state">-</strong></p>
     <div style="margin:12px 0">
-      <input id="public-url" placeholder="Public URL shown to users, e.g. https://relay.example.com" style="width:420px">
-      <button onclick="savePublicUrl()">Save URL</button>
+      <input id="public-url" placeholder="显示给用户的公网地址，例如 https://relay.example.com" style="width:420px">
+      <button onclick="savePublicUrl()">保存地址</button>
       <span id="public-url-msg" style="font-size:13px;color:#888"></span>
     </div>
     <pre id="tunnel-log" style="background:#111;border:1px solid #333;border-radius:6px;padding:10px;font-size:11px;max-height:300px;overflow:auto;white-space:pre-wrap;color:#aaa"></pre>
 
-    <h2 style="margin-top:28px">Public Access (frp)</h2>
+    <h2 style="margin-top:28px">公网访问（frp）</h2>
     <p style="color:#888;font-size:13px;line-height:1.6">
-      A second way in, through your own frp server; works alongside the tunnel.
-      The relay serves HTTPS itself with a Let's Encrypt certificate for the domain, proven by a DNS record it adds in Cloudflare.<br>
-      The domain must resolve to the frp server, not through Cloudflare's proxy. The Cloudflare token needs Zone → DNS → Edit on the domain's zone.
-      Secret fields left empty keep their saved values.
+      经你自己的 frp 服务器提供第二个入口，可与 Tunnel 同时使用。
+      路由器自己提供 HTTPS，证书来自 Let's Encrypt，通过在 Cloudflare 添加 DNS 记录完成验证。<br>
+      域名必须直接解析到 frp 服务器（不经 Cloudflare 代理）。Cloudflare token 需要该域名所在 Zone 的 DNS 编辑权限。
+      密钥类字段留空表示保持已保存的值。
     </p>
-    <div id="frp-unavailable" class="msg error hidden">This build has no frpc or no frp listener.</div>
+    <div id="frp-unavailable" class="msg error hidden">此版本没有 frpc 或 frp 监听。</div>
     <div style="margin:12px 0;display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px;max-width:840px">
-      <input id="frp-server" placeholder="frp server, e.g. frp.example.com:7000">
+      <input id="frp-server" placeholder="frp 服务器，例如 frp.example.com:7000">
       <input id="frp-token" type="password" placeholder="frp token" autocomplete="off">
-      <input id="frp-port" type="number" min="1" max="65535" placeholder="Remote port, e.g. 40939">
-      <input id="frp-domain" placeholder="Domain, e.g. frp.example.com">
+      <input id="frp-port" type="number" min="1" max="65535" placeholder="远程端口，例如 40939">
+      <input id="frp-domain" placeholder="域名，例如 frp.example.com">
       <input id="frp-dns-token" type="password" placeholder="Cloudflare DNS API token" autocomplete="off">
     </div>
     <div style="margin:12px 0">
-      <button onclick="saveFrp()">Save &amp; connect</button>
-      <button class="btn-danger" onclick="disableFrp()">Turn off</button>
+      <button onclick="saveFrp()">保存并连接</button>
+      <button class="btn-danger" onclick="disableFrp()">关闭</button>
       <span id="frp-msg" style="font-size:13px;color:#888"></span>
     </div>
-    <p>Status: <strong id="frp-state">-</strong> · Certificate: <strong id="frp-cert">-</strong> · <span id="frp-url"></span></p>
+    <p>状态：<strong id="frp-state">-</strong> · 证书：<strong id="frp-cert">-</strong> · <span id="frp-url"></span></p>
     <pre id="frp-log" style="background:#111;border:1px solid #333;border-radius:6px;padding:10px;font-size:11px;max-height:300px;overflow:auto;white-space:pre-wrap;color:#aaa"></pre>
   </div>
 
   <!-- Limits -->
   <div id="tab-limits" class="card hidden">
-    <h2>Usage Limits</h2>
-    <p style="color:#888;font-size:13px">Windows are rolling (the last 5 hours / day / week). Tokens include cached input. A request over any limit gets 429. 0 blocks.</p>
+    <h2>用量限额</h2>
+    <p style="color:#888;font-size:13px">窗口是滚动的（最近 5 小时 / 1 天 / 1 周）。token 数包含缓存命中的输入。超过任一限额的请求返回 429。填 0 表示禁止。</p>
     <div style="margin-bottom:12px">
       <select id="lim-user"></select>
-      <input id="lim-model" placeholder="Model id, e.g. kimi/k3 (* = all)" value="*" style="width:200px">
+      <input id="lim-model" placeholder="模型 id，例如 kimi/k3（* 表示全部）" value="*" style="width:200px">
       <select id="lim-window">
-        <option value="18000">per 5 hours</option>
-        <option value="86400" selected>per day</option>
-        <option value="604800">per week</option>
+        <option value="18000">每 5 小时</option>
+        <option value="86400" selected>每天</option>
+        <option value="604800">每周</option>
       </select>
-      <input id="lim-req" placeholder="Max requests (empty = ∞)" style="width:170px" type="number" min="0">
-      <input id="lim-tok" placeholder="Max tokens (empty = ∞)" style="width:170px" type="number" min="0">
-      <button onclick="createLimit()">Set Limit</button>
+      <input id="lim-req" placeholder="最多请求数（空 = 不限）" style="width:170px" type="number" min="0">
+      <input id="lim-tok" placeholder="最多 token（空 = 不限）" style="width:170px" type="number" min="0">
+      <button onclick="createLimit()">设置限额</button>
     </div>
-    <table><thead><tr><th>User</th><th>Model</th><th>Window</th><th>Requests</th><th>Tokens</th><th></th></tr></thead><tbody id="limits-body"></tbody></table>
+    <table><thead><tr><th>用户</th><th>模型</th><th>窗口</th><th>请求数</th><th>token</th><th></th></tr></thead><tbody id="limits-body"></tbody></table>
   </div>
 
-  <div style="margin-top:20px"><button class="secondary" onclick="logout()">Logout</button></div>
+  <div style="margin-top:20px"><button class="secondary" onclick="logout()">退出登录</button></div>
 </div>
 </div>
 

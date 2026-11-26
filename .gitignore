@@ -3,3 +3,5 @@ target/
 lazycat/content/
 *.lpk
 lazycat/cache/
+dist/
+lzc-build-store.yml.bak

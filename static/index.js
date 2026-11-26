@@ -35,13 +35,13 @@ async function login() {
     apiKey = res.api_key;
     localStorage.setItem('token', token);
     loadDashboard();
-  } catch (e) { showMsg('auth-msg', 'Login failed: ' + e.message, false); }
+  } catch (e) { showMsg('auth-msg', '登录失败 · Login failed: ' + e.message, false); }
 }
 
 async function register() {
   const pw = document.getElementById('reg-password').value;
   const pw2 = document.getElementById('reg-password2').value;
-  if (pw !== pw2) { showMsg('auth-msg', 'Passwords do not match', false); return; }
+  if (pw !== pw2) { showMsg('auth-msg', '两次密码不一致 · Passwords do not match', false); return; }
   try {
     const res = await api('/auth/register', {
       method: 'POST',
@@ -51,7 +51,7 @@ async function register() {
     apiKey = res.api_key;
     localStorage.setItem('token', token);
     loadDashboard();
-  } catch (e) { showMsg('auth-msg', 'Register failed: ' + e.message, false); }
+  } catch (e) { showMsg('auth-msg', '注册失败 · Register failed: ' + e.message, false); }
 }
 
 // The JWT payload says whether this user is an admin; only admins get the admin entry
@@ -260,7 +260,7 @@ function copyCode(id) {
 }
 
 async function refreshKey() {
-  if (!confirm('Regenerate API key? Old key will stop working.')) return;
+  if (!confirm('重新生成 API key？旧 key 将立即失效。· Regenerate API key? The old key will stop working.')) return;
   const res = await api('/user/api-key/refresh', { method: 'POST' });
   apiKey = res.api_key;
   document.getElementById('api-key-display').textContent = apiKey;

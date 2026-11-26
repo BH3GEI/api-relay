@@ -1,22 +1,21 @@
-package: bh3gei.lzcapp.api-relay
-version: 0.8.4
-name: API Relay
+package: bh3gei.lzcapp.modelrouter
+version: 0.9.0
+name: 模型路由器
 description: >-
-  One endpoint and one key for all your AI coding plans. Pools upstream keys with automatic
-  failover, keeps the model list in sync with each provider, and serves the APIs coding agents
-  use: Anthropic Messages, OpenAI Chat Completions and Responses.
+  给 Claude Code、Codex 等编程 agent 用的模型路由器：一个地址、一把 key 接入你所有的模型套餐。模型组按顺序自动回退（包月套餐优先、按量计费兜底），
+  多把上游 key 故障自动切换，每次调用都记账，带用量面板和限额；兼容 Anthropic Messages、OpenAI Chat Completions 与 Responses。
 author: BH3GEI
 license: MIT
 homepage: https://github.com/BH3GEI/api-relay
 locales:
   zh:
-    name: API 中转
+    name: 模型路由器
     description: >-
-      一个地址、一把 key，统一使用你所有的 AI 编程套餐。多把上游 key 自动故障切换，模型列表与各家上游实时同步，
-      支持编程 agent 需要的接口：Anthropic Messages、OpenAI Chat Completions 与 Responses。
+      给 Claude Code、Codex 等编程 agent 用的模型路由器：一个地址、一把 key 接入你所有的模型套餐。模型组按顺序自动回退（包月套餐优先、按量计费兜底），
+      多把上游 key 故障自动切换，每次调用都记账，带用量面板和限额；兼容 Anthropic Messages、OpenAI Chat Completions 与 Responses。
   en:
-    name: API Relay
+    name: Model Router
     description: >-
-      One endpoint and one key for all your AI coding plans. Pools upstream keys with automatic
-      failover, keeps the model list in sync with each provider, and serves the APIs coding agents
-      use: Anthropic Messages, OpenAI Chat Completions and Responses.
+      A model router for coding agents such as Claude Code and Codex: one endpoint and one key for all your model plans. Model groups
+      fall back in order (monthly plans first, pay-as-you-go last), upstream keys fail over automatically, every call is metered with a
+      usage dashboard and limits. Speaks Anthropic Messages, OpenAI Chat Completions and Responses.

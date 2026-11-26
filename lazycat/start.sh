@@ -2,6 +2,8 @@
 # Entry point inside the LazyCat app container.
 # LAZYCAT=1 trusts the identity headers LazyCat's gateway sets; only safe behind that gateway.
 export LAZYCAT=1
+# Store package: content recording is opt-in for every new user
+export RECORD_CONTENT_DEFAULT=false
 export DATABASE_URL="sqlite:/lzcapp/var/relay.db?mode=rwc"
 # Every relayed call, in full; grows without bound, so it lives apart from relay.db
 export CAPTURE_DATABASE_URL="sqlite:/lzcapp/var/capture.db?mode=rwc"

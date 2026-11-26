@@ -1,5 +1,6 @@
 application:
-  subdomain: relay
+  subdomain: modelrouter
+  background_task: true
   upstreams:
     - location: /
       backend: http://127.0.0.1:3000/

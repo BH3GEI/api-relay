@@ -3,43 +3,43 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>API Relay</title>
+<title>模型路由器 · Model Router</title>
 <link rel="stylesheet" href="/static/base.css">
 <link rel="stylesheet" href="/static/index.css">
 </head>
 <body>
 <div class="container">
 <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
-  <h1>API Relay</h1>
+  <h1>模型路由器 · Model Router</h1>
   <a id="admin-link" href="/admin" class="hidden"><button class="secondary">管理后台</button></a>
 </div>
-<p class="subtitle">多标准兼容的 API 中转服务</p>
+<p class="subtitle">给 Claude Code、Codex 等编程 agent 用的模型路由器</p>
 
 <!-- Auth section -->
 <div id="auth-section">
   <div class="card">
     <div style="display:flex;gap:4px;margin-bottom:16px">
-      <button class="tab active" id="tab-login-btn" onclick="showAuthTab('login')">Login</button>
-      <button class="tab" id="tab-register-btn" onclick="showAuthTab('register')">Register</button>
+      <button class="tab active" id="tab-login-btn" onclick="showAuthTab('login')">登录 · Login</button>
+      <button class="tab" id="tab-register-btn" onclick="showAuthTab('register')">注册 · Register</button>
     </div>
 
     <div id="login-form">
-      <input id="login-username" placeholder="Username">
-      <input id="login-password" type="password" placeholder="Password">
-      <button onclick="login()">Login</button>
+      <input id="login-username" placeholder="用户名 · Username">
+      <input id="login-password" type="password" placeholder="密码 · Password">
+      <button onclick="login()">登录 · Login</button>
     </div>
 
     <div id="register-form" class="hidden">
-      <input id="reg-username" placeholder="Username">
-      <input id="reg-email" type="email" placeholder="Email">
-      <input id="reg-password" type="password" placeholder="Password">
-      <input id="reg-password2" type="password" placeholder="Confirm Password">
-      <button onclick="register()">Register</button>
+      <input id="reg-username" placeholder="用户名 · Username">
+      <input id="reg-email" type="email" placeholder="邮箱 · Email">
+      <input id="reg-password" type="password" placeholder="密码 · Password">
+      <input id="reg-password2" type="password" placeholder="确认密码 · Confirm Password">
+      <button onclick="register()">注册 · Register</button>
     </div>
 
     <div id="auth-msg" class="msg hidden"></div>
-    <p style="color:#666;font-size:12px;margin-top:12px;line-height:1.6">本服务会记录每次调用，包括请求和回复的内容；登录后可以在首页关闭内容记录。<br>
-    Calls through this relay are recorded, including their content; you can turn content recording off on the home page after signing in.</p>
+    <p style="color:#666;font-size:12px;margin-top:12px;line-height:1.6">本服务会记录每次调用的时间、模型、token 数等元数据，用于统计用量；是否同时记录请求和回复内容，登录后在首页自己选择。<br>
+    Calls are logged with time, model and token counts for usage stats; whether their content is recorded too is your choice on the home page after signing in.</p>
   </div>
 </div>
 
@@ -48,7 +48,7 @@
 
   <!-- Quick Start -->
   <div class="card">
-    <h2>Quick Start</h2>
+    <h2>快速开始</h2>
     <p>三步即可开始使用：</p>
 
     <div class="step">
@@ -59,7 +59,7 @@
           <tr><td>API Base URL</td><td id="cfg-base"></td></tr>
           <tr id="cfg-backup-row" class="hidden"><td>备用地址</td><td><span id="cfg-backup"></span><div style="color:#666;font-size:12px">主地址连不上时，可以把 Base URL 换成这个，API Key 不变。</div></td></tr>
           <tr id="cfg-lan-row" class="hidden"><td>LazyCat 内网地址</td><td id="cfg-lan" style="color:#888"></td></tr>
-          <tr><td>API Key</td><td><span id="cfg-key"></span> <button class="copy-btn" style="position:static;margin-left:4px" onclick="copyKey()">Copy</button></td></tr>
+          <tr><td>API Key</td><td><span id="cfg-key"></span> <button class="copy-btn" style="position:static;margin-left:4px" onclick="copyKey()">复制</button></td></tr>
         </table>
       </div>
     </div>
@@ -84,7 +84,7 @@
 
         <h3>Claude Code</h3>
         <p>设置环境变量即可：</p>
-        <div class="pre-wrap"><pre id="claude-code-example">loading...</pre><button class="copy-btn" onclick="copyCode('claude-code-example')">Copy</button></div>
+        <div class="pre-wrap"><pre id="claude-code-example">loading...</pre><button class="copy-btn" onclick="copyCode('claude-code-example')">复制</button></div>
 
         <h3>RooCode / Continue</h3>
         <p>在插件设置中选择 "OpenAI Compatible"，填入 Base URL 和 API Key。</p>
@@ -93,22 +93,22 @@
         <p>选择 OpenAI 作为 Provider，将 API 地址改为 Base URL，填入 API Key。</p>
 
         <h3>Python (OpenAI SDK)</h3>
-        <div class="pre-wrap"><pre id="python-example">loading...</pre><button class="copy-btn" onclick="copyCode('python-example')">Copy</button></div>
+        <div class="pre-wrap"><pre id="python-example">loading...</pre><button class="copy-btn" onclick="copyCode('python-example')">复制</button></div>
 
         <h3>Python (Anthropic SDK)</h3>
-        <div class="pre-wrap"><pre id="python-anthropic-example">loading...</pre><button class="copy-btn" onclick="copyCode('python-anthropic-example')">Copy</button></div>
+        <div class="pre-wrap"><pre id="python-anthropic-example">loading...</pre><button class="copy-btn" onclick="copyCode('python-anthropic-example')">复制</button></div>
 
         <h3>curl</h3>
-        <div class="pre-wrap"><pre id="curl-example">loading...</pre><button class="copy-btn" onclick="copyCode('curl-example')">Copy</button></div>
+        <div class="pre-wrap"><pre id="curl-example">loading...</pre><button class="copy-btn" onclick="copyCode('curl-example')">复制</button></div>
 
-        <h3>Image Generation (Imagen)</h3>
-        <div class="pre-wrap"><pre id="imagen-example">loading...</pre><button class="copy-btn" onclick="copyCode('imagen-example')">Copy</button></div>
+        <h3>图片生成（Imagen）</h3>
+        <div class="pre-wrap"><pre id="imagen-example">loading...</pre><button class="copy-btn" onclick="copyCode('imagen-example')">复制</button></div>
 
-        <h3>Video Generation (Veo)</h3>
-        <div class="pre-wrap"><pre id="veo-example">loading...</pre><button class="copy-btn" onclick="copyCode('veo-example')">Copy</button></div>
+        <h3>视频生成（Veo）</h3>
+        <div class="pre-wrap"><pre id="veo-example">loading...</pre><button class="copy-btn" onclick="copyCode('veo-example')">复制</button></div>
 
-        <h3>File Upload (Kimi)</h3>
-        <div class="pre-wrap"><pre id="file-upload-example">loading...</pre><button class="copy-btn" onclick="copyCode('file-upload-example')">Copy</button></div>
+        <h3>文件上传（Kimi）</h3>
+        <div class="pre-wrap"><pre id="file-upload-example">loading...</pre><button class="copy-btn" onclick="copyCode('file-upload-example')">复制</button></div>
       </div>
     </div>
 
@@ -124,8 +124,8 @@
   <!-- Recording -->
   <div class="card">
     <h2>请求记录 · Request recording</h2>
-    <p style="line-height:1.7">中转站会记录每次调用：时间、模型、token 数、耗时、状态、来源 IP，以及请求和回复的完整内容（你发的消息、系统提示、工具定义和模型的回答）。这些记录只有管理员能看，用于排查问题、改进服务和内部模型研究。</p>
-    <p style="line-height:1.7;color:#888;margin-top:8px">The relay records every call: time, model, tokens, timing, status, IP, and the full request and response (your messages, system prompt, tool definitions and the model's answers). Only the admin can see them; they are used for troubleshooting, improving the service and internal model research.</p>
+    <p style="line-height:1.7">每次调用都会记录时间、模型、token 数、耗时、状态、来源 IP 等元数据，用于用量统计和排查问题。打开下面的开关后，还会记录请求和回复的完整内容（你发的消息、系统提示、工具定义和模型的回答），默认关闭。记录保存在你自己的微服上，只有管理员能看。</p>
+    <p style="line-height:1.7;color:#888;margin-top:8px">Every call is logged with time, model, tokens, timing, status and IP, for usage stats and troubleshooting. With the switch below on, the full request and response are recorded too (off by default). Records stay on your own box; only the admin can see them.</p>
     <label style="display:block;margin-top:12px;cursor:pointer"><input type="checkbox" id="rec-content" onchange="setRecording(this.checked)" style="display:inline;width:auto;margin:0 8px 0 0;vertical-align:middle">记录请求和回复的内容 · Record request and response content</label>
     <p style="color:#666;font-size:12px;margin-top:6px">关闭后，之后的调用只记时间、模型、token 数这类信息，不记内容；已经记下的不受影响。Turning it off applies to later calls; what was recorded stays.</p>
     <div id="rec-msg" class="msg hidden" style="margin-top:8px"></div>
@@ -142,7 +142,7 @@
     <h2>我的限额</h2>
     <p>按滚动窗口计算：比如"5 小时"指最近 5 小时内的用量。</p>
     <table class="config-table" id="limits-table">
-      <tr><td>Loading...</td><td></td></tr>
+      <tr><td>加载中…</td><td></td></tr>
     </table>
   </div>
 
@@ -151,19 +151,19 @@
     <h2>号池余量</h2>
     <p>所有用户共用这些套餐，数字是整个号池还剩多少。个人限额和号池余量用 API 也能查：<code>GET <span class="base-url"></span>/v1/quota</code>（带 API Key）。</p>
     <table class="config-table" id="quota-table">
-      <tr><td>Loading...</td><td></td></tr>
+      <tr><td>加载中…</td><td></td></tr>
     </table>
   </div>
 
   <!-- API Key -->
   <div class="card">
-    <h2>Your API Key</h2>
+    <h2>你的 API Key</h2>
     <div class="key-display">
       <code id="api-key-display">loading...</code>
-      <button class="secondary" onclick="copyKey()">Copy</button>
+      <button class="secondary" onclick="copyKey()">复制</button>
     </div>
     <div style="margin-top:12px">
-      <button class="secondary" onclick="refreshKey()">Regenerate Key</button>
+      <button class="secondary" onclick="refreshKey()">重新生成 Key</button>
     </div>
     <div class="info-box" style="margin-top:12px">
       Regenerate 会让旧 Key 立刻失效，所有使用旧 Key 的工具需要重新配置。
@@ -183,17 +183,17 @@
 
   <!-- Models -->
   <div class="card">
-    <h2>Available Models</h2>
+    <h2>可用模型</h2>
     <p>以下模型可直接在 <code>model</code> 字段中使用：</p>
     <ul class="model-list" id="model-list"></ul>
   </div>
 
   <!-- FAQ -->
   <div class="card">
-    <h2>FAQ</h2>
+    <h2>常见问题</h2>
 
     <h3>这是什么？</h3>
-    <p>这是一个 API 中转服务。你可以用统一的地址和 Key 访问多家 AI 模型，无需分别注册各家服务。</p>
+    <p>这是一个模型路由器：用统一的地址和 Key 访问你接入的多家 AI 模型，模型组按顺序自动回退。</p>
 
     <h3>支持 streaming 吗？</h3>
     <p>支持。在请求中加入 <code>"stream": true</code> 即可获得流式响应。</p>
@@ -231,8 +231,8 @@
   </div>
 
   <div style="margin-top:16px;display:flex;gap:8px">
-    <a id="admin-link-bottom" href="/admin" class="hidden"><button class="secondary">Admin Panel</button></a>
-    <button class="secondary" onclick="logout()">Logout</button>
+    <a id="admin-link-bottom" href="/admin" class="hidden"><button class="secondary">管理后台</button></a>
+    <button class="secondary" onclick="logout()">退出登录</button>
   </div>
 </div>
 </div>

@@ -47,11 +47,18 @@ pub struct NewUser<'a> {
     pub is_admin: bool,
 }
 
+/// Whether new users have their call content recorded. On unless `RECORD_CONTENT_DEFAULT` is
+/// `false`/`0`/`off` (the store package sets it off: content recording is opt-in there).
+pub fn record_content_default() -> bool {
+    !matches!(std::env::var("RECORD_CONTENT_DEFAULT").as_deref(), Ok("false" | "0" | "off"))
+}
+
 /// None when the username (or key) is taken.
 pub async fn insert(db: &Db, u: &NewUser<'_>) -> sqlx::Result<Option<User>> {
     let inserted = sqlx::query_as(&format!(
-        "INSERT INTO users (username, email, password_hash, api_key, is_admin) VALUES (?, ?, ?, ?, ?) RETURNING {COLUMNS}"
-    )).bind(u.username).bind(u.email).bind(u.password_hash).bind(u.api_key).bind(u.is_admin).fetch_one(db).await;
+        "INSERT INTO users (username, email, password_hash, api_key, is_admin, record_content) VALUES (?, ?, ?, ?, ?, ?) RETURNING {COLUMNS}"
+    )).bind(u.username).bind(u.email).bind(u.password_hash).bind(u.api_key).bind(u.is_admin)
+        .bind(record_content_default()).fetch_one(db).await;
     match inserted {
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Ok(None),
         other => other.map(Some),
