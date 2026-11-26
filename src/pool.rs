@@ -130,7 +130,10 @@ impl KeyPool {
                     }
                 };
                 let status = resp.status().as_u16();
-                if !RETRY_STATUSES.contains(&status) {
+                // A 400 is usually the request's own fault, but some upstreams answer an expired
+                // plan or an empty balance with one; read it to tell, and pass it on otherwise
+                let (resp, spent) = if status == 400 { read_400(resp).await } else { (resp, false) };
+                if !RETRY_STATUSES.contains(&status) && !spent {
                     // Anything we don't retry (including a 400 for a bad request) means the key works
                     self.record(key, status.to_string(), true);
                     self.cooldowns.lock().unwrap().remove(key);
@@ -182,7 +185,8 @@ impl Failure {
         let says = |words: &[&str]| words.iter().any(|w| body.contains(w));
         if says(&["concurren", "并发"]) {
             Failure::Busy
-        } else if status == 429 && says(&["quota", "usage limit", "使用上限", "额度", "余额"]) {
+        } else if status == 400 || status == 429 && says(&["quota", "usage limit", "使用上限", "额度", "余额"]) {
+            // A 400 only gets here when it says the plan or balance is spent
             Failure::OutOfQuota
         } else if (401..=403).contains(&status) {
             Failure::Refused
@@ -200,6 +204,23 @@ impl Failure {
             Failure::Other => retry_after.unwrap_or(30).clamp(1, 600),
         })
     }
+}
+
+/// Words in a 400 that mean the key's plan or balance can't pay for requests, not that the
+/// request is wrong (Volcengine Ark: "does not have a valid AgentPlan subscription").
+const SPENT_WORDS: &[&str] = &["subscription", "订阅", "quota", "额度", "余额", "insufficient balance", "arrear", "欠费"];
+
+/// A 400 answer, read whole, and whether it says the key is spent; the answer comes back as it was.
+async fn read_400(resp: reqwest::Response) -> (reqwest::Response, bool) {
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = resp.bytes().await.unwrap_or_default();
+    let text = String::from_utf8_lossy(&body).to_lowercase();
+    let spent = SPENT_WORDS.iter().any(|w| text.contains(w));
+    let mut rebuilt = http::Response::new(body);
+    *rebuilt.status_mut() = status;
+    *rebuilt.headers_mut() = headers;
+    (reqwest::Response::from(rebuilt), spent)
 }
 
 fn retry_after(resp: &reqwest::Response) -> Option<u64> {

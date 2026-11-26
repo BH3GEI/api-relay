@@ -679,7 +679,7 @@ async fn every_call_is_recorded_in_full_unless_the_user_opts_out() {
 async fn group_providers(r: &Relay) {
     r.provider("a", &["spent"]).await;
     r.provider("b", &["good"]).await;
-    for (name, key, models) in [("dead", "bad", "x1"), ("c", "good", "overloaded, cut")] {
+    for (name, key, models) in [("dead", "bad", "x1"), ("c", "good", "overloaded, cut, badreq")] {
         let p = r.admin("POST", "/admin/providers", Some(json!({ "name": name, "base_url": format!("{}/v1", r.upstream.base), "user_agent": "t", "models": models }))).await.json();
         r.admin("POST", &format!("/admin/keys/{}", p["id"]), Some(json!({ "api_key": key }))).await;
     }
@@ -833,4 +833,41 @@ async fn names_that_are_not_groups_behave_as_before() {
     assert_eq!(models, [json!("overloaded"), json!("m1")]);
     let ok = r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "b/m2", "messages": [] }))).await;
     assert_eq!(ok.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn an_expired_plan_hands_over_like_a_spent_key_but_a_bad_request_does_not() {
+    let r = Relay::start().await;
+    group_providers(&r).await;
+    for (name, key) in [("ark", "expired"), ("ark2", "expired")] {
+        let p = r.admin("POST", "/admin/providers", Some(json!({ "name": name, "base_url": format!("{}/v1", r.upstream.base), "user_agent": "t", "models": "code" }))).await.json();
+        r.admin("POST", &format!("/admin/keys/{}", p["id"]), Some(json!({ "api_key": key }))).await;
+    }
+    r.admin("POST", "/admin/catalog/refresh", None).await;
+    group(&r, "mid", json!(["ark/code", "b/m2"])).await;
+    group(&r, "strict", json!(["c/badreq", "b/m2"])).await;
+    let (_, key) = r.user("bob", "bobpassword1").await;
+    let auth = bearer(&key);
+    let h = [("authorization", auth.as_str())];
+
+    // An expired subscription (400) moves the group on, over both APIs
+    let resp = r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "mid", "messages": [] }))).await;
+    assert_eq!(resp.status, StatusCode::OK, "{}", resp.text);
+    let m = r.public("POST", "/v1/messages", &[("x-api-key", &key)], Some(json!({ "model": "mid", "max_tokens": 5, "messages": [] }))).await;
+    assert_eq!(m.status, StatusCode::OK, "{}", m.text);
+    // The expired key is set aside for half an hour (a provider's only key is still tried, as before)
+    let keys = r.admin("GET", "/admin/keys/5", None).await.json();
+    assert!(keys[0]["status"]["cooling_secs"].as_u64().unwrap() > 1000, "{keys}");
+
+    // Alone, it reads as unavailable keys, without the upstream's body
+    let alone = r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "ark2/code", "messages": [] }))).await;
+    assert_eq!(alone.status, StatusCode::BAD_REQUEST);
+    assert_eq!(alone.json()["error"]["message"], "All upstream keys are unavailable (last upstream status 400)");
+
+    // A plain bad request is the client's to fix: passed on as it is, no other model tried
+    let bad = r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "strict", "messages": [] }))).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+    assert!(bad.text.contains("field required"), "{}", bad.text);
+    let after_bad: Vec<_> = r.upstream.seen("/v1/chat/completions").iter().rev().take(1).map(|s| s.body["model"].clone()).collect();
+    assert_eq!(after_bad, [json!("badreq")]);
 }

@@ -83,6 +83,9 @@ async fn chat(State(seen): State<Arc<Mutex<Vec<Seen>>>>, headers: HeaderMap, bod
     if refused(&headers) || key(&headers) == "chatbad" {
         return (StatusCode::UNAUTHORIZED, r#"{"error":"account a@b.c is suspended"}"#).into_response();
     }
+    if key(&headers) == "expired" {
+        return (StatusCode::BAD_REQUEST, r#"{"error":{"code":"InvalidSubscription","message":"The account does not have a valid AgentPlan subscription"}}"#).into_response();
+    }
     if key(&headers) == "spent" {
         return (StatusCode::TOO_MANY_REQUESTS, r#"{"error":{"message":"You've reached your weekly (7-day) usage limit.","type":"exceeded_current_quota_error"}}"#).into_response();
     }
@@ -91,6 +94,9 @@ async fn chat(State(seen): State<Arc<Mutex<Vec<Seen>>>>, headers: HeaderMap, bod
         return (StatusCode::FORBIDDEN, r#"{"error":{"message":"You've reached your concurrent request limit.","type":"access_terminated_error"}}"#).into_response();
     }
     let req: Value = serde_json::from_slice(&body).unwrap_or_default();
+    if req["model"] == "badreq" {
+        return (StatusCode::BAD_REQUEST, r#"{"error":{"message":"messages: field required"}}"#).into_response();
+    }
     if req["model"] == "overloaded" {
         return (StatusCode::from_u16(529).unwrap(), r#"{"error":{"message":"overloaded"}}"#).into_response();
     }
@@ -124,6 +130,9 @@ async fn messages(State(seen): State<Arc<Mutex<Vec<Seen>>>>, headers: HeaderMap,
     record(&seen, "/v1/messages", &headers, &body);
     if refused(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if key(&headers) == "expired" {
+        return (StatusCode::BAD_REQUEST, r#"{"type":"error","error":{"type":"invalid_request_error","message":"The account does not have a valid AgentPlan subscription"}}"#).into_response();
     }
     axum::Json(json!({ "type": "message", "content": [{ "type": "text", "text": "ok" }], "usage": { "input_tokens": 3, "output_tokens": 2 } })).into_response()
 }
