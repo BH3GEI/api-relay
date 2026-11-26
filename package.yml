@@ -6,7 +6,7 @@ description: >-
   多把上游 key 故障自动切换，每次调用都记账，带用量面板和限额；兼容 Anthropic Messages、OpenAI Chat Completions 与 Responses。
 author: BH3GEI
 license: MIT
-homepage: https://github.com/BH3GEI/api-relay
+homepage: https://github.com/BH3GEI/api-relay/tree/store
 locales:
   zh:
     name: 模型路由器
