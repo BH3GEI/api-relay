@@ -4,6 +4,7 @@
 
 pub mod files;
 pub mod models;
+mod translate;
 
 use axum::{
     body::Body,
@@ -190,16 +191,20 @@ async fn try_model(state: &AppState, user: &User, headers: &HeaderMap, body: &Va
         Err(e) => return Tried::Answered(Err(e)),
     };
 
-    let mut body = body.clone();
+    // A provider without an OpenAI base speaks only Anthropic Messages; Chat Completions are
+    // translated to it and back
+    let translated = endpoint == Endpoint::ChatCompletions && provider.base_url.trim().is_empty();
+    let include_usage = body["stream_options"]["include_usage"].as_bool().unwrap_or(true);
+    let mut body = if translated { translate::request(body, &entry.upstream_model) } else { body.clone() };
     body["model"] = Value::String(entry.upstream_model.clone());
-    if stream && endpoint == Endpoint::ChatCompletions && body.get("stream_options").is_none() {
+    if stream && endpoint == Endpoint::ChatCompletions && !translated && body.get("stream_options").is_none() {
         // Without this, streamed Chat Completions never report token usage
         body["stream_options"] = serde_json::json!({ "include_usage": true });
     }
     let body = body.to_string();
     capture.sent(&body);
 
-    let (url, key_header) = endpoint.upstream(&provider, &entry.upstream_model);
+    let (url, key_header) = if translated { Endpoint::Messages } else { endpoint }.upstream(&provider, &entry.upstream_model);
     // Anthropic clients pick the API version and opt into beta features per request
     let anthropic_version = headers.get("anthropic-version").and_then(|v| v.to_str().ok()).unwrap_or("2023-06-01");
     let anthropic_beta = headers.get("anthropic-beta").and_then(|v| v.to_str().ok());
@@ -237,6 +242,10 @@ async fn try_model(state: &AppState, user: &User, headers: &HeaderMap, body: &Va
     capture.attempts(attempts.clone());
 
     let resp = match sent {
+        Ok(resp) if resp.status().is_success() && translated => match back_to_chat(resp, stream, include_usage, &entry.id).await {
+            Some(resp) => resp,
+            None => return Tried::Answered(Err(StatusCode::BAD_GATEWAY.into())),
+        },
         Ok(resp) if resp.status().is_success() => resp,
         refused => {
             // Refused or failed requests don't count against the user
@@ -281,6 +290,22 @@ async fn try_model(state: &AppState, user: &User, headers: &HeaderMap, body: &Va
         // Generated media report no tokens; the request is what counts
         _ => pass_through(resp, None, capture.take()),
     })
+}
+
+/// A Messages answer to a translated Chat Completions request, as a Chat Completions answer.
+async fn back_to_chat(resp: reqwest::Response, stream: bool, include_usage: bool, model: &str) -> Option<reqwest::Response> {
+    let status = resp.status();
+    let body = if stream {
+        let events = translate::stream(resp.bytes_stream(), model.to_string(), include_usage);
+        (reqwest::Body::wrap_stream(events), "text/event-stream")
+    } else {
+        let bytes = resp.bytes().await.ok()?;
+        (reqwest::Body::from(translate::response(&bytes, model)), "application/json")
+    };
+    let mut out = axum::http::Response::new(body.0);
+    *out.status_mut() = status;
+    out.headers_mut().insert(header::CONTENT_TYPE, axum::http::HeaderValue::from_static(body.1));
+    Some(reqwest::Response::from(out))
 }
 
 /// Every model of a group failed: say why each did, without any upstream's own error body.

@@ -871,3 +871,42 @@ async fn an_expired_plan_hands_over_like_a_spent_key_but_a_bad_request_does_not(
     let after_bad: Vec<_> = r.upstream.seen("/v1/chat/completions").iter().rev().take(1).map(|s| s.body["model"].clone()).collect();
     assert_eq!(after_bad, [json!("badreq")]);
 }
+
+#[tokio::test]
+async fn chat_completions_reach_an_anthropic_only_provider_through_translation() {
+    let r = Relay::start().await;
+    let p = r.admin("POST", "/admin/providers", Some(json!({ "name": "ink", "base_url": "", "anthropic_base_url": r.upstream.base, "user_agent": "t", "models": "mini" }))).await.json();
+    r.admin("POST", &format!("/admin/keys/{}", p["id"]), Some(json!({ "api_key": "good" }))).await;
+    assert_eq!(r.admin("POST", "/admin/catalog/refresh", None).await.json(), json!(["ink/mini"]));
+    let (_, key) = r.user("bob", "bobpassword1").await;
+    let auth = bearer(&key);
+    let h = [("authorization", auth.as_str())];
+
+    // A tool call, whole
+    let tools = json!([{ "type": "function", "function": { "name": "move_arm", "parameters": { "type": "object" } } }]);
+    let resp = r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "ink/mini", "tools": tools, "messages": [{ "role": "system", "content": "robot" }, { "role": "user", "content": "go" }] }))).await;
+    assert_eq!(resp.status, StatusCode::OK, "{}", resp.text);
+    let c = resp.json();
+    assert_eq!(c["choices"][0]["message"]["tool_calls"][0]["function"], json!({ "name": "move_arm", "arguments": "{\"x\":1}" }));
+    assert_eq!((c["choices"][0]["finish_reason"].clone(), c["choices"][0]["message"]["reasoning_content"].clone()), (json!("tool_calls"), json!("use it")));
+    let sent = r.upstream.seen("/v1/messages");
+    assert_eq!(sent[0].headers["x-api-key"], "good");
+    assert_eq!((sent[0].body["model"].clone(), sent[0].body["system"].clone(), sent[0].body["tools"][0]["name"].clone()), (json!("mini"), json!([{ "type": "text", "text": "robot" }]), json!("move_arm")));
+    assert!(r.upstream.seen("/v1/chat/completions").is_empty());
+
+    // Streamed, counted from the translated usage
+    let resp = r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "ink/mini", "stream": true, "messages": [{ "role": "user", "content": "hi" }] }))).await;
+    assert_eq!((resp.status, resp.headers["content-type"].to_str().unwrap()), (StatusCode::OK, "text/event-stream"));
+    assert!(resp.text.contains("\"content\":\"ok\"") && resp.text.contains("\"reasoning_content\":\"hm\"") && resp.text.ends_with("data: [DONE]\n\n"), "{}", resp.text);
+    let mut models = json!(null);
+    for _ in 0..50 {
+        models = r.public("GET", "/v1/user/usage?period=day", &h, None).await.json()["models"].clone();
+        if models[0]["requests"] == 2 && models[0]["total_tokens"] == 21 { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(brief(&models), json!([{ "model": "ink/mini", "requests": 2, "total_tokens": 21 }]));
+
+    // Anthropic clients go straight through
+    let m = r.public("POST", "/v1/messages", &[("x-api-key", &key)], Some(json!({ "model": "ink/mini", "max_tokens": 5, "messages": [] }))).await;
+    assert_eq!(m.json()["content"][0]["text"], "ok");
+}

@@ -140,6 +140,10 @@ impl Catalog {
 
 /// `GET {base_url}/models` from the upstream, as (id, metadata) pairs.
 async fn fetch_models(state: &AppState, p: &Provider) -> Option<Vec<(String, Value)>> {
+    // Without an OpenAI base (an Anthropic-only provider) there is no list; its extra models are it
+    if p.base_url.trim().is_empty() {
+        return Some(Vec::new());
+    }
     let keys = db::providers::usable_keys(&state.db, p.id).await.ok()?;
     let url = format!("{}/models", p.base_url.trim_end_matches('/'));
 

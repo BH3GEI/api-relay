@@ -134,6 +134,22 @@ async fn messages(State(seen): State<Arc<Mutex<Vec<Seen>>>>, headers: HeaderMap,
     if key(&headers) == "expired" {
         return (StatusCode::BAD_REQUEST, r#"{"type":"error","error":{"type":"invalid_request_error","message":"The account does not have a valid AgentPlan subscription"}}"#).into_response();
     }
+    let req: Value = serde_json::from_slice(&body).unwrap_or_default();
+    if req["stream"] == true {
+        let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":6}}}\n\n\
+            data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n\
+            data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hm\"}}\n\n\
+            data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\"}}\n\n\
+            data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n\
+            data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n\
+            data: {\"type\":\"message_stop\"}\n\n";
+        return ([("content-type", "text/event-stream")], sse).into_response();
+    }
+    if let Some(tool) = req["tools"][0]["name"].as_str() {
+        return axum::Json(json!({ "id": "msg_2", "type": "message", "stop_reason": "tool_use",
+            "content": [{ "type": "thinking", "thinking": "use it" }, { "type": "tool_use", "id": "tu_1", "name": tool, "input": { "x": 1 } }],
+            "usage": { "input_tokens": 9, "output_tokens": 4 } })).into_response();
+    }
     axum::Json(json!({ "type": "message", "content": [{ "type": "text", "text": "ok" }], "usage": { "input_tokens": 3, "output_tokens": 2 } })).into_response()
 }
 
