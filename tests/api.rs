@@ -714,6 +714,10 @@ async fn admins_manage_model_groups_and_clients_see_them() {
     let models = r.public("GET", "/v1/models", &h, None).await.json();
     assert_eq!((models["data"][0]["id"].clone(), models["data"][0]["models"].clone()), (json!("auto"), json!(["b/m2", "a/m1"])));
     assert_eq!(r.public("GET", "/v1/models/auto", &h, None).await.json()["owned_by"], "relay");
+    // A group's context length is its members' smallest, and absent if any member doesn't say (m2 doesn't)
+    assert_eq!(models["data"][0].get("context_length"), None);
+    group(&r, "small", json!(["a/m1", "b/m1"])).await;
+    assert_eq!(r.public("GET", "/v1/models/small", &h, None).await.json()["context_length"], json!(1000));
 
     assert_eq!(r.admin("DELETE", &format!("/admin/groups/{id}"), None).await.status, StatusCode::NO_CONTENT);
     assert_eq!(r.public("POST", "/v1/chat/completions", &h, Some(json!({ "model": "auto", "messages": [] }))).await.status, StatusCode::NOT_FOUND);
